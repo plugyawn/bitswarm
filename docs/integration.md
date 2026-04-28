@@ -49,23 +49,3 @@ to the downloader so a bad or partial peer is not tried for every manifest
 piece. Clients still verify every byte against the manifest, but applications
 with stricter network policy should filter direct and tracker peers before
 download.
-
-## Local Web UI
-
-The `bitswarm webui` command starts a local torrent-style browser console:
-
-```bash
-uv run bitswarm webui --host 127.0.0.1 --port 8897
-```
-
-The UI is a clean-room operator layer over the existing protocol APIs. It does
-not add application authority to the public protocol. Seeded roots are exposed
-through the standard peer endpoints:
-
-- `GET /api/manifests/{manifest_id}`
-- `GET /api/manifests/{manifest_id}/piece-map`
-- `GET /api/manifests/{manifest_id}/pieces/{piece_id}`
-
-Downloads use the existing verified downloader and tracker discovery behavior.
-The local UI API lives under `/api/ui/*` and is not part of the public transfer
-protocol.

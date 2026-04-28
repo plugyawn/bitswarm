@@ -20,7 +20,6 @@ from bitswarm.protocol.schemas import BitswarmAnnounce
 from bitswarm.protocol.verifier import verify_manifest_tree
 from bitswarm.tracker.app import create_tracker_app
 from bitswarm.tracker.schemas import TrackerPeersResponse, TrackerPieceMapResponse
-from bitswarm.webui.app import create_webui_app, is_safe_local_bind
 
 
 def _positive_int(value: str) -> int:
@@ -130,15 +129,6 @@ def _main(argv: list[str] | None = None) -> int:
     peers_parser.add_argument("--tracker", required=True)
     peers_parser.add_argument("--token", required=True)
 
-    webui_parser = sub.add_parser("webui", help="Run the local torrent-style Web UI.")
-    webui_parser.add_argument("--host", default="127.0.0.1")
-    webui_parser.add_argument("--port", type=int, default=8897)
-    webui_parser.add_argument(
-        "--unsafe-allow-remote-bind",
-        action="store_true",
-        help="Allow binding the path-capable Web UI to a non-local interface.",
-    )
-
     args = parser.parse_args(argv)
     if args.command == "manifest":
         manifest = create_manifest(Path(args.path), piece_size=args.piece_size, name=args.name)
@@ -225,13 +215,6 @@ def _main(argv: list[str] | None = None) -> int:
             expected_piece_ids=expected_piece_ids,
         ):
             print(peer_source.base_url if isinstance(peer_source, PeerSource) else peer_source)
-        return 0
-    if args.command == "webui":
-        if not is_safe_local_bind(args.host) and not args.unsafe_allow_remote_bind:
-            parser.error(
-                "webui binds to local interfaces by default; pass --unsafe-allow-remote-bind explicitly"
-            )
-        uvicorn.run(create_webui_app(), host=args.host, port=args.port)
         return 0
     parser.error(f"unknown command {args.command}")
     return 2

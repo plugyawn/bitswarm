@@ -71,22 +71,6 @@ uv run bitswarm download manifest.json --tracker http://127.0.0.1:8898 --token "
   --out ./downloaded-tree
 ```
 
-Run the local torrent-style Web UI:
-
-```bash
-uv run bitswarm webui --host 127.0.0.1 --port 8897
-```
-
-Open `http://127.0.0.1:8897`. The Web UI is a clean-room local console, not a
-fork of a BitTorrent client. It can:
-
-- seed a local file tree through Bitswarm-compatible peer endpoints
-- add downloads from a manifest plus direct peers or tracker discovery
-- show progress, pieces, files, peer counts, transfer rate, and errors
-
-The Web UI accepts local filesystem paths, so it binds to loopback by default.
-Binding it to a remote interface requires `--unsafe-allow-remote-bind`.
-
 ## Protocol Contract
 
 Every accepted byte must pass:
