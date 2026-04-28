@@ -1,0 +1,20 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install
+        run: uv sync --locked --extra dev
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Tests
+        run: uv run pytest
+      - name: Build wheel
+        run: uv build
