@@ -32,6 +32,17 @@ bitswarm = "bitswarm.cli:safe_main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/bitswarm"]
 
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/docs",
+  "/README.md",
+  "/AGENTS.md",
+  "/pyproject.toml",
+  "/uv.lock",
+]
+
 [tool.pytest.ini_options]
 addopts = "-q"
 asyncio_mode = "auto"

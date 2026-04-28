@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bitswarm Web UI</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">BS</div>
+          <div>
+            <h1>Bitswarm</h1>
+            <p>verified transfer console</p>
+          </div>
+        </div>
+        <nav class="nav">
+          <button class="nav-item active" data-panel="transfers">Transfers</button>
+          <button class="nav-item" data-panel="seeds">Seeds</button>
+          <button class="nav-item" data-panel="details">Details</button>
+        </nav>
+        <div class="sidebar-card">
+          <span class="label">Local endpoint</span>
+          <strong id="local-origin">detecting</strong>
+          <span class="hint">Use this origin as a direct peer for seeded manifests.</span>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow">clean-room torrent-style UI</div>
+            <h2>Immutable file-tree transfers</h2>
+          </div>
+          <div class="stats">
+            <div><span id="stat-active">0</span><small>active</small></div>
+            <div><span id="stat-seeding">0</span><small>seeding</small></div>
+            <div><span id="stat-rate">0 B/s</span><small>down</small></div>
+          </div>
+        </header>
+
+        <section class="forms">
+          <form id="download-form" class="panel-form">
+            <div class="form-title">
+              <h3>Add download</h3>
+              <span>Manifest + direct peers or tracker</span>
+            </div>
+            <label>
+              Manifest path
+              <input name="manifest_path" placeholder="/path/to/manifest.json" required />
+            </label>
+            <label>
+              Output path
+              <input name="output_path" placeholder="/path/to/output" required />
+            </label>
+            <label>
+              Direct peers
+              <input name="peers" placeholder="http://127.0.0.1:8897, https://peer.example" />
+            </label>
+            <div class="form-grid">
+              <label>
+                Tracker URL
+                <input name="tracker_url" placeholder="optional" />
+              </label>
+              <label>
+                Token
+                <input name="token" placeholder="optional" type="password" />
+              </label>
+            </div>
+            <button type="submit">Start download</button>
+          </form>
+
+          <form id="seed-form" class="panel-form">
+            <div class="form-title">
+              <h3>Add seed</h3>
+              <span>Serve a local tree through this UI process</span>
+            </div>
+            <label>
+              Root path
+              <input name="root_path" placeholder="/path/to/tree-or-file" required />
+            </label>
+            <label>
+              Manifest path
+              <input name="manifest_path" placeholder="optional existing manifest" />
+            </label>
+            <div class="form-grid">
+              <label>
+                Piece size
+                <input name="piece_size" placeholder="1048576" inputmode="numeric" />
+              </label>
+              <label>
+                Name
+                <input name="name" placeholder="optional" />
+              </label>
+            </div>
+            <button type="submit">Start seeding</button>
+          </form>
+        </section>
+
+        <section class="content-grid">
+          <section class="card transfers-card" data-panel-id="transfers">
+            <div class="card-header">
+              <h3>Transfers</h3>
+              <span id="transfer-count">0 items</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Status</th>
+                    <th>Progress</th>
+                    <th>Pieces</th>
+                    <th>Peers</th>
+                    <th>Down</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="transfer-rows"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="card seeds-card" data-panel-id="seeds">
+            <div class="card-header">
+              <h3>Seeds</h3>
+              <span id="seed-count">0 items</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Status</th>
+                    <th>Pieces</th>
+                    <th>Size</th>
+                    <th>Manifest</th>
+                  </tr>
+                </thead>
+                <tbody id="seed-rows"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="card details-card" data-panel-id="details">
+            <div class="card-header">
+              <h3>Selected transfer</h3>
+              <span id="selected-id">none</span>
+            </div>
+            <div id="detail-empty" class="empty">Select a transfer to inspect files and pieces.</div>
+            <div id="detail-view" class="details hidden">
+              <div class="detail-line">
+                <span>Output</span>
+                <strong id="detail-output"></strong>
+              </div>
+              <div class="detail-line">
+                <span>Manifest</span>
+                <strong id="detail-manifest"></strong>
+              </div>
+              <h4>Files</h4>
+              <div id="file-list" class="list"></div>
+              <h4>Pieces</h4>
+              <div id="piece-grid" class="piece-grid"></div>
+            </div>
+          </section>
+        </section>
+
+        <section class="log-card">
+          <div class="card-header">
+            <h3>Event log</h3>
+            <button id="clear-log" type="button">clear</button>
+          </div>
+          <pre id="log"></pre>
+        </section>
+      </main>
+    </div>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>
