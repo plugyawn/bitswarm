@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bitswarm"
+version = "1.0.0a1"
+description = "Verified peer-assisted transfer for immutable file trees."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Bitswarm contributors" }]
+dependencies = [
+  "fastapi>=0.115",
+  "httpcore>=1.0.9,<1.1",
+  "httpx>=0.28.1,<0.29",
+  "orjson>=3.10",
+  "pydantic>=2.8",
+  "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2",
+  "pytest-asyncio>=0.24",
+  "ruff>=0.8",
+]
+
+[project.scripts]
+bitswarm = "bitswarm.cli:safe_main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bitswarm"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
