@@ -72,6 +72,30 @@ magnet:?xt=urn:bitswarm:<manifest-id>&xs=/absolute/path/manifest.json&x.pe=http%
 The bridge binds to loopback by default because it accepts local filesystem
 paths. Remote binding requires `--unsafe-allow-remote-bind`.
 
+### Shared Run Lobby
+
+The AriaNg bridge includes a local shared run registry for all browser tabs
+connected to one UI server. This is browser/product state only; it is not the
+public Bitswarm transfer protocol.
+
+Operators are represented as `A` through `O`. A tab can set its operator with a
+query parameter such as `?actor=B`, or by using the operator dropdown in the Run
+modal. The toolbar exposes Start Run and Runs controls in the same Bootstrap /
+AriaNg chrome. Start Run lets the host choose a recipe, profile, visibility,
+population, worker cap, and shortlist ratio. Runs lists active runs and lets
+other operators join. The registry is available through:
+
+```text
+GET  /api/bitswarm/ui/catalog
+GET  /api/bitswarm/ui/runs
+POST /api/bitswarm/ui/runs
+POST /api/bitswarm/ui/runs/{run_id}/join
+```
+
+Registered runs are projected into aria2 JSON-RPC responses as normal active
+tasks. AriaNg can therefore show running runs in the standard Downloading list,
+with members and settings visible through normal task details.
+
 The UI can also render application progress such as training rounds, workers,
 rollouts, validation, or other workload state through an optional sidecar
 presentation feed:

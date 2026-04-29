@@ -25,6 +25,7 @@ from bitswarm.protocol.manifest import load_manifest
 from bitswarm.protocol.paths import resolve_target_without_symlink_ancestors
 from bitswarm.protocol.schemas import BitswarmManifest
 
+from .runs import RunRecord, RunRegistry
 from .telemetry import TelemetryProgress, TelemetryProvider, WorkloadTelemetry
 
 JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
@@ -133,10 +134,12 @@ class AriaNgBridge:
         download_fn: DownloadFn | None = None,
         default_output_dir: Path | None = None,
         telemetry_provider: TelemetryProvider | None = None,
+        run_registry: RunRegistry | None = None,
     ) -> None:
         self._download_fn = download_fn or _default_download
         self._default_output_dir = default_output_dir or Path.cwd() / "bitswarm-downloads"
         self._telemetry_provider = telemetry_provider
+        self._run_registry = run_registry
         self._transfers: dict[str, Transfer] = {}
         self._lock = asyncio.Lock()
         self._global_options: dict[str, JsonValue] = {
@@ -265,12 +268,17 @@ class AriaNgBridge:
         task = await self._telemetry_task_by_gid(gid, fields=fields)
         if task is not None:
             return task
+        task = await self._run_task_by_gid(gid, fields=fields)
+        if task is not None:
+            return task
         raise RpcFailure(1, f"gid not found: {gid}")
 
     async def _rpc_getUris(self, params: list[Any]) -> JsonValue:
         gid = _gid_from_params(params)
         if await self._telemetry_gid_exists(gid):
             return [{"uri": f"bitswarm-telemetry:{gid}", "status": "used"}]
+        if await self._run_gid_exists(gid):
+            return [{"uri": f"bitswarm-run:{gid}", "status": "used"}]
         transfer = await self._transfer_from_params(params)
         return [{"uri": transfer.uri, "status": "used"}]
 
@@ -279,6 +287,9 @@ class AriaNgBridge:
         telemetry_files = await self._telemetry_files_by_gid(gid)
         if telemetry_files is not None:
             return telemetry_files
+        run_files = await self._run_files_by_gid(gid)
+        if run_files is not None:
+            return run_files
         transfer = await self._transfer_from_params(params)
         return self._file_views(transfer)
 
@@ -287,6 +298,9 @@ class AriaNgBridge:
         telemetry_peers = await self._telemetry_peers_by_gid(gid)
         if telemetry_peers is not None:
             return telemetry_peers
+        run_peers = await self._run_peers_by_gid(gid)
+        if run_peers is not None:
+            return run_peers
         transfer = await self._transfer_from_params(params)
         bitfield = _bitfield(transfer.completed_pieces, transfer.num_pieces)
         return [
@@ -308,6 +322,8 @@ class AriaNgBridge:
         gid = _gid_from_params(params)
         if await self._telemetry_gid_exists(gid):
             return [{"index": "1", "servers": [{"uri": f"bitswarm-telemetry:{gid}", "downloadSpeed": "0"}]}]
+        if await self._run_gid_exists(gid):
+            return [{"index": "1", "servers": [{"uri": f"bitswarm-run:{gid}", "downloadSpeed": "0"}]}]
         transfer = await self._transfer_from_params(params)
         return [
             {
@@ -325,14 +341,14 @@ class AriaNgBridge:
 
     async def _rpc_getOption(self, params: list[Any]) -> JsonValue:
         gid = _gid_from_params(params)
-        if await self._telemetry_gid_exists(gid):
+        if await self._telemetry_gid_exists(gid) or await self._run_gid_exists(gid):
             return {}
         transfer = await self._transfer_from_params(params)
         return dict(transfer.options)
 
     async def _rpc_changeOption(self, params: list[Any]) -> JsonValue:
         gid = _gid_from_params(params)
-        if await self._telemetry_gid_exists(gid):
+        if await self._telemetry_gid_exists(gid) or await self._run_gid_exists(gid):
             return "OK"
         transfer = await self._transfer_from_params(params)
         options = params[1] if len(params) > 1 and isinstance(params[1], dict) else {}
@@ -359,16 +375,21 @@ class AriaNgBridge:
         telemetry_stopped = [
             task for task in telemetry_tasks if task.get("status") in {"complete", "error", "removed"}
         ]
+        run_tasks = await self._run_task_views(fields=None)
+        run_active = [task for task in run_tasks if task.get("status") == "active"]
+        run_waiting = [task for task in run_tasks if task.get("status") in {"waiting", "paused"}]
+        run_stopped = [task for task in run_tasks if task.get("status") in {"complete", "error", "removed"}]
         return {
             "downloadSpeed": str(
                 sum(transfer.download_speed for transfer in active)
                 + sum(int(str(task.get("downloadSpeed") or "0")) for task in telemetry_active)
+                + sum(int(str(task.get("downloadSpeed") or "0")) for task in run_active)
             ),
             "uploadSpeed": "0",
-            "numActive": str(len(active) + len(telemetry_active)),
-            "numWaiting": str(len(waiting) + len(telemetry_waiting)),
-            "numStopped": str(len(stopped) + len(telemetry_stopped)),
-            "numStoppedTotal": str(len(stopped) + len(telemetry_stopped)),
+            "numActive": str(len(active) + len(telemetry_active) + len(run_active)),
+            "numWaiting": str(len(waiting) + len(telemetry_waiting) + len(run_waiting)),
+            "numStopped": str(len(stopped) + len(telemetry_stopped) + len(run_stopped)),
+            "numStoppedTotal": str(len(stopped) + len(telemetry_stopped) + len(run_stopped)),
         }
 
     async def _rpc_getVersion(self, params: list[Any]) -> JsonValue:
@@ -416,7 +437,7 @@ class AriaNgBridge:
 
     async def _rpc_removeDownloadResult(self, params: list[Any]) -> JsonValue:
         gid = _gid_from_params(params)
-        if await self._telemetry_gid_exists(gid):
+        if await self._telemetry_gid_exists(gid) or await self._run_gid_exists(gid):
             return "OK"
         async with self._lock:
             self._transfers.pop(gid, None)
@@ -431,7 +452,7 @@ class AriaNgBridge:
 
     async def _rpc_changePosition(self, params: list[Any]) -> JsonValue:
         gid = _gid_from_params(params)
-        if await self._telemetry_gid_exists(gid):
+        if await self._telemetry_gid_exists(gid) or await self._run_gid_exists(gid):
             return gid
         transfer = await self._transfer_from_params(params)
         return transfer.gid
@@ -445,6 +466,7 @@ class AriaNgBridge:
             selected = [transfer for transfer in self._transfers.values() if transfer.status in statuses]
         rows = [self._task_view(transfer, fields=fields) for transfer in selected]
         rows.extend(await self._telemetry_task_views(statuses=statuses, fields=fields))
+        rows.extend(await self._run_task_views(statuses=statuses, fields=fields))
         return rows
 
     async def _transfer_from_params(self, params: list[Any]) -> Transfer:
@@ -460,7 +482,7 @@ class AriaNgBridge:
 
     async def _pause_one(self, params: list[Any]) -> JsonValue:
         gid = _gid_from_params(params)
-        if await self._telemetry_gid_exists(gid):
+        if await self._telemetry_gid_exists(gid) or await self._run_gid_exists(gid):
             return gid
         transfer = await self._transfer_from_params(params)
         if transfer.task is not None and not transfer.task.done():
@@ -484,7 +506,7 @@ class AriaNgBridge:
 
     async def _remove_one(self, params: list[Any]) -> JsonValue:
         gid = _gid_from_params(params)
-        if await self._telemetry_gid_exists(gid):
+        if await self._telemetry_gid_exists(gid) or await self._run_gid_exists(gid):
             return gid
         transfer = await self._transfer_from_params(params)
         if transfer.task is not None and not transfer.task.done():
@@ -735,6 +757,118 @@ class AriaNgBridge:
         }
         return _filter_view(view, fields)
 
+    async def _run_task_views(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        fields: list[Any] | None = None,
+    ) -> list[dict[str, JsonValue]]:
+        if self._run_registry is None:
+            return []
+        runs = await self._run_registry.list_runs()
+        views = [self._run_task_view(run, fields=fields) for run in runs]
+        if statuses is not None:
+            allowed = set(statuses)
+            views = [view for view in views if str(view.get("status")) in allowed]
+        return views
+
+    async def _run_task_by_gid(
+        self,
+        gid: str,
+        *,
+        fields: list[Any] | None = None,
+    ) -> dict[str, JsonValue] | None:
+        run = await self._run_by_gid(gid)
+        if run is None:
+            return None
+        return self._run_task_view(run, fields=fields)
+
+    async def _run_gid_exists(self, gid: str) -> bool:
+        return await self._run_by_gid(gid) is not None
+
+    async def _run_files_by_gid(self, gid: str) -> list[dict[str, JsonValue]] | None:
+        run = await self._run_by_gid(gid)
+        if run is None:
+            return None
+        return _run_file_views(run)
+
+    async def _run_peers_by_gid(self, gid: str) -> list[dict[str, JsonValue]] | None:
+        run = await self._run_by_gid(gid)
+        if run is None:
+            return None
+        bitfield = _bitfield(len(run.members), max(1, int(run.settings.get("max_workers", 1))))
+        return [
+            {
+                "peerId": f"bitswarm-run-{member.actor}",
+                "ip": member.actor,
+                "port": "0",
+                "client": f"{member.role}:{member.state}",
+                "bitfield": bitfield,
+                "amChoking": "false",
+                "peerChoking": "false",
+                "downloadSpeed": "0",
+                "uploadSpeed": "0",
+                "seeder": "true" if member.role == "host" else "false",
+            }
+            for member in run.members
+        ]
+
+    async def _run_by_gid(self, gid: str) -> RunRecord | None:
+        if self._run_registry is None:
+            return None
+        for run in await self._run_registry.list_runs():
+            if _run_gid(run.run_id) == gid:
+                return run
+        return None
+
+    def _run_task_view(
+        self,
+        run: RunRecord,
+        *,
+        fields: list[Any] | None = None,
+    ) -> dict[str, JsonValue]:
+        total = max(1, int(run.settings.get("max_workers", 1)))
+        completed = min(len(run.members), total)
+        status = _run_status(run.status)
+        gid = _run_gid(run.run_id)
+        view: dict[str, JsonValue] = {
+            "gid": gid,
+            "status": status,
+            "totalLength": str(total),
+            "completedLength": str(completed),
+            "uploadLength": "0",
+            "downloadSpeed": "0",
+            "uploadSpeed": "0",
+            "connections": str(len(run.members)),
+            "numSeeders": "1",
+            "seeder": "true" if status == "complete" else "false",
+            "dir": f"bitswarm://runs/{run.run_id}",
+            "files": _run_file_views(run),
+            "bitfield": _bitfield(completed, total),
+            "numPieces": str(total),
+            "pieceLength": "1",
+            "errorCode": "1" if status == "error" else "0",
+            "errorMessage": "",
+            "verifiedLength": str(completed),
+            "verifyIntegrityPending": "false",
+            "infoHash": gid * 2 + gid[:8],
+            "bittorrent": {
+                "announceList": [],
+                "creationDate": str(run.created_at_ms // 1000),
+                "mode": "multi",
+                "info": {"name": f"{run.name} [{run.recipe_label}]"},
+            },
+            "comment": " | ".join(
+                [
+                    f"host {run.host_actor}",
+                    run.profile_label,
+                    run.visibility,
+                    f"{len(run.members)}/{total} joined",
+                ]
+            ),
+        }
+        return _filter_view(view, fields)
+
 
 class RpcFailure(Exception):
     def __init__(self, code: int, message: str) -> None:
@@ -904,6 +1038,10 @@ def _telemetry_gid(progress_id: str) -> str:
     return hashlib.blake2s(f"telemetry:{progress_id}".encode(), digest_size=8).hexdigest()
 
 
+def _run_gid(run_id: str) -> str:
+    return hashlib.blake2s(f"run:{run_id}".encode(), digest_size=8).hexdigest()
+
+
 def _telemetry_status(state: str) -> str:
     normalized = state.strip().lower().replace("_", "-")
     if normalized in {"complete", "completed", "done", "accepted", "success", "succeeded"}:
@@ -917,6 +1055,19 @@ def _telemetry_status(state: str) -> str:
     if normalized in {"removed", "cancelled", "canceled"}:
         return "removed"
     return "active"
+
+
+def _run_status(state: str) -> str:
+    normalized = state.strip().lower()
+    if normalized == "running":
+        return "active"
+    if normalized == "paused":
+        return "paused"
+    if normalized == "complete":
+        return "complete"
+    if normalized == "error":
+        return "error"
+    return "waiting"
 
 
 def _scaled_progress(current: int | float, total: int | float) -> tuple[int, int]:
@@ -1042,3 +1193,32 @@ def _display_path(title: str, section: str, label: str, detail: str = "") -> str
 
 def _safe_path_part(value: str) -> str:
     return " ".join(value.replace("/", " / ").split())
+
+
+def _run_file_views(run: RunRecord) -> list[dict[str, JsonValue]]:
+    total = max(1, int(run.settings.get("max_workers", 1)))
+    rows: list[tuple[str, int, int]] = [
+        (
+            _display_path(run.name, "run", run.run_id, f"{run.status} {len(run.members)}/{total} joined"),
+            total,
+            min(len(run.members), total),
+        ),
+        (_display_path(run.name, "recipe", run.recipe_label, run.recipe_id), 1, 1),
+        (_display_path(run.name, "profile", run.profile_label, run.profile_id), 1, 1),
+        (_display_path(run.name, "host", run.host_actor, run.visibility), 1, 1),
+    ]
+    for key, value in sorted(run.settings.items()):
+        rows.append((_display_path(run.name, "setting", key, str(value)), 1, 1))
+    for member in run.members:
+        rows.append((_display_path(run.name, "member", member.actor, f"{member.role} {member.state}"), 1, 1))
+    return [
+        {
+            "index": str(index),
+            "path": path,
+            "length": str(max(length, 1)),
+            "completedLength": str(max(0, min(completed, max(length, 1)))),
+            "selected": "true",
+            "uris": [{"uri": f"bitswarm-run:{run.run_id}", "status": "used"}],
+        }
+        for index, (path, length, completed) in enumerate(rows, start=1)
+    ]

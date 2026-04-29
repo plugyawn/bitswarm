@@ -17,6 +17,9 @@ Local adaptation:
 - Visible first-run chrome is patched to say Bitswarm, route first-run users to
   the download list instead of stock AriaNg settings, and hide the irrelevant
   Aria2 settings/status routes behind `bitswarm-adapter.js`/`.css`.
+- `bitswarm-adapter.js` adds AriaNg-style toolbar buttons and Bootstrap modal
+  forms for the local shared run lobby. It talks only to `/api/bitswarm/ui/*`
+  endpoints in the colocated bridge process.
 - `bitswarm-adapter.js` does not render custom workload panels. Workload
   telemetry is projected through the local aria2-compatible JSON-RPC bridge as
   normal AriaNg task/file/peer/status rows.

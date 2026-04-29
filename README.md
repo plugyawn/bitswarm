@@ -95,6 +95,13 @@ magnet:?xt=urn:bitswarm:<manifest-id>&xs=/absolute/path/manifest.json&x.pe=http%
 The UI bridge is local operator tooling. It does not change the public Bitswarm
 peer or tracker protocol.
 
+The same bridge also exposes a shared local run lobby for browser tabs pointed
+at the same UI server. Operators identify themselves as `A` through `O` with
+`?actor=A` or the operator dropdown. One operator can open Start Run, choose a
+recipe/profile, and start a run; other operators refresh or open Runs and join
+that run. Run state is also projected into AriaNg as ordinary active task rows,
+so the running run appears in the normal download-manager list.
+
 Applications can project training or other workload progress into the UI with a
 separate sidecar presentation feed:
 

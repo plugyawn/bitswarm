@@ -182,6 +182,117 @@ async def test_ariang_default_telemetry_is_disabled() -> None:
     assert response.json()["enabled"] is False
 
 
+async def test_ariang_run_registry_create_list_and_join() -> None:
+    app = create_ariang_app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ui") as client:
+        catalog_response = await client.get("/api/bitswarm/ui/catalog")
+        assert catalog_response.status_code == 200
+        catalog = catalog_response.json()
+        assert catalog["operators"] == list("ABCDEFGHIJKLMNO")
+        assert {recipe["id"] for recipe in catalog["recipes"]} >= {"qwen05-arithmetic"}
+
+        create_response = await client.post(
+            "/api/bitswarm/ui/runs",
+            json={
+                "actor": "A",
+                "name": "Fifteen person test",
+                "recipe_id": "qwen05-arithmetic",
+                "profile_id": "smoke",
+                "visibility": "public",
+                "settings": {"population": 5, "max_workers": 14, "shortlist_ratio": 0.01},
+            },
+        )
+        assert create_response.status_code == 200
+        created = create_response.json()
+        assert created["host_actor"] == "A"
+        assert created["members"] == [
+            {
+                "actor": "A",
+                "role": "host",
+                "state": "hosting",
+                "joined_at_ms": created["created_at_ms"],
+            }
+        ]
+
+        join_response = await client.post(
+            f"/api/bitswarm/ui/runs/{created['run_id']}/join",
+            json={"actor": "B"},
+        )
+        assert join_response.status_code == 200
+        joined = join_response.json()
+        assert {member["actor"] for member in joined["members"]} == {"A", "B"}
+
+        list_response = await client.get("/api/bitswarm/ui/runs")
+    assert list_response.status_code == 200
+    runs = list_response.json()["runs"]
+    assert [run["run_id"] for run in runs] == [created["run_id"]]
+    assert len(runs[0]["members"]) == 2
+
+
+async def test_ariang_run_registry_rejects_invalid_actor() -> None:
+    app = create_ariang_app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ui") as client:
+        response = await client.post(
+            "/api/bitswarm/ui/runs",
+            json={
+                "actor": "Z",
+                "name": "Bad actor",
+                "recipe_id": "qwen05-arithmetic",
+                "profile_id": "smoke",
+                "visibility": "public",
+                "settings": {},
+            },
+        )
+    assert response.status_code == 400
+    assert "actor must be one of" in response.json()["detail"]
+
+
+async def test_ariang_run_registry_projects_runs_as_native_tasks() -> None:
+    app = create_ariang_app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ui") as client:
+        create_response = await client.post(
+            "/api/bitswarm/ui/runs",
+            json={
+                "actor": "A",
+                "name": "Native run task",
+                "recipe_id": "qwen05-arithmetic",
+                "profile_id": "smoke",
+                "visibility": "public",
+                "settings": {"population": 5, "max_workers": 14, "shortlist_ratio": 0.01},
+            },
+        )
+        run_id = create_response.json()["run_id"]
+        await client.post(f"/api/bitswarm/ui/runs/{run_id}/join", json={"actor": "B"})
+        active_response = await client.post(
+            "/jsonrpc",
+            json={
+                "jsonrpc": "2.0",
+                "id": "active",
+                "method": "aria2.tellActive",
+                "params": [["gid", "status", "totalLength", "completedLength", "bittorrent", "files"]],
+            },
+        )
+        rows = active_response.json()["result"]
+        task = next(row for row in rows if row["bittorrent"]["info"]["name"].startswith("Native run task"))
+        status_response = await client.post(
+            "/jsonrpc",
+            json={"jsonrpc": "2.0", "id": "status", "method": "aria2.tellStatus", "params": [task["gid"]]},
+        )
+        peers_response = await client.post(
+            "/jsonrpc",
+            json={"jsonrpc": "2.0", "id": "peers", "method": "aria2.getPeers", "params": [task["gid"]]},
+        )
+    assert task["status"] == "active"
+    assert task["totalLength"] == "14"
+    assert task["completedLength"] == "2"
+    assert any(file["path"].endswith("member/B/worker joined") for file in task["files"])
+    assert status_response.json()["result"]["comment"] == "host A | Smoke | public | 2/14 joined"
+    assert {peer["ip"] for peer in peers_response.json()["result"]} == {"A", "B"}
+
+
 async def test_ariang_jsonrpc_add_uri_download_tracks_completion(
     sample_tree: Path,
     tmp_path: Path,

@@ -8,3 +8,12 @@ body.bitswarm-bridge .main-sidebar li[data-href-match="/debug"] {
 body.bitswarm-bridge .main-sidebar li.header:nth-of-type(2) {
   display: none !important;
 }
+
+#bitswarm-run-modal .bitswarm-run-tabs {
+  padding-top: 15px;
+}
+
+#bitswarm-run-modal .bitswarm-run-error {
+  margin-bottom: 10px;
+  min-height: 20px;
+}
