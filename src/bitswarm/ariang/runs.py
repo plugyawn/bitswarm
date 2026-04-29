@@ -47,6 +47,29 @@ class RunMember(StrictUiModel):
     joined_at_ms: StrictInt = Field(ge=0)
 
 
+class RolloutRecord(StrictUiModel):
+    rollout_id: StrictStr = Field(min_length=1)
+    seed_id: StrictStr = Field(min_length=1)
+    machine: StrictStr = Field(min_length=1)
+    item_id: StrictStr = Field(min_length=1)
+    sign: Literal["+", "-"] = "+"
+    status: Literal["pending", "running", "completed", "failed"] = "pending"
+    issued_at_ms: StrictInt = Field(ge=0)
+    completed_at_ms: StrictInt | None = Field(default=None, ge=0)
+    correct: StrictBool | None = None
+    score: StrictFloat | None = None
+    expected: StrictStr = ""
+    output: StrictStr = ""
+
+
+class SeedRecord(StrictUiModel):
+    seed_id: StrictStr = Field(min_length=1)
+    sigma_id: StrictStr = Field(min_length=1)
+    issued_at_ms: StrictInt = Field(ge=0)
+    state: Literal["pending", "leased", "completed"] = "pending"
+    rollouts: list[RolloutRecord] = Field(default_factory=list)
+
+
 class RunRecord(StrictUiModel):
     run_id: StrictStr = Field(min_length=1)
     name: StrictStr = Field(min_length=1)
@@ -60,6 +83,7 @@ class RunRecord(StrictUiModel):
     created_at_ms: StrictInt = Field(ge=0)
     updated_at_ms: StrictInt = Field(ge=0)
     members: list[RunMember] = Field(default_factory=list)
+    seeds: list[SeedRecord] = Field(default_factory=list)
     settings: dict[str, JsonScalar] = Field(default_factory=dict)
 
 
@@ -74,6 +98,17 @@ class RunCreateRequest(StrictUiModel):
 
 class RunJoinRequest(StrictUiModel):
     actor: StrictStr = Field(min_length=1)
+
+
+class RolloutUpdateRequest(StrictUiModel):
+    machine: StrictStr = Field(min_length=1)
+    item_id: StrictStr = Field(min_length=1)
+    sign: Literal["+", "-"] = "+"
+    status: Literal["pending", "running", "completed", "failed"]
+    correct: StrictBool | None = None
+    score: StrictFloat | None = None
+    expected: StrictStr = ""
+    output: StrictStr = ""
 
 
 class RunCatalog(StrictUiModel):
@@ -131,6 +166,10 @@ class RunRegistry:
             created_at_ms=now,
             updated_at_ms=now,
             members=[RunMember(actor=actor, role="host", state="hosting", joined_at_ms=now)],
+            seeds=_make_seed_records(
+                population=int(settings.get("population", profile.population)),
+                now_ms=now,
+            ),
             settings=settings,
         )
         async with self._lock:
@@ -149,6 +188,50 @@ class RunRegistry:
             state: Literal["hosting", "joined"] = "hosting" if role == "host" else "joined"
             members.append(RunMember(actor=actor, role=role, state=state, joined_at_ms=now))
             updated = run.model_copy(update={"members": members, "updated_at_ms": now})
+            self._runs[run_id] = updated
+            return updated
+
+    async def update_rollout(
+        self,
+        run_id: str,
+        seed_id: str,
+        request: RolloutUpdateRequest,
+    ) -> RunRecord:
+        async with self._lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                raise RunNotFound(run_id)
+            now = _now_ms()
+            seeds: list[SeedRecord] = []
+            found_seed = False
+            for seed in run.seeds:
+                if seed.seed_id != seed_id:
+                    seeds.append(seed)
+                    continue
+                found_seed = True
+                rollout_id = f"{seed_id}:{request.sign}:{request.machine}:{request.item_id}"
+                existing = [row for row in seed.rollouts if row.rollout_id != rollout_id]
+                previous = next((row for row in seed.rollouts if row.rollout_id == rollout_id), None)
+                rollout = RolloutRecord(
+                    rollout_id=rollout_id,
+                    seed_id=seed_id,
+                    machine=request.machine,
+                    item_id=request.item_id,
+                    sign=request.sign,
+                    status=request.status,
+                    issued_at_ms=previous.issued_at_ms if previous is not None else now,
+                    completed_at_ms=now if request.status in {"completed", "failed"} else None,
+                    correct=request.correct,
+                    score=request.score,
+                    expected=request.expected,
+                    output=request.output,
+                )
+                rollouts = sorted([*existing, rollout], key=lambda row: (row.issued_at_ms, row.rollout_id))
+                state = _seed_state(rollouts)
+                seeds.append(seed.model_copy(update={"rollouts": rollouts, "state": state}))
+            if not found_seed:
+                raise RunConfigurationError(f"unknown seed: {seed_id}")
+            updated = run.model_copy(update={"seeds": seeds, "updated_at_ms": now})
             self._runs[run_id] = updated
             return updated
 
@@ -246,3 +329,24 @@ def _normalize_actor(actor: str) -> str:
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _make_seed_records(*, population: int, now_ms: int) -> list[SeedRecord]:
+    return [
+        SeedRecord(
+            seed_id=f"seed-{index:06d}",
+            sigma_id=f"sigma-{(index % 3) + 1}",
+            issued_at_ms=now_ms + index,
+            state="pending",
+            rollouts=[],
+        )
+        for index in range(max(0, population))
+    ]
+
+
+def _seed_state(rollouts: list[RolloutRecord]) -> Literal["pending", "leased", "completed"]:
+    if not rollouts:
+        return "pending"
+    if all(row.status in {"completed", "failed"} for row in rollouts):
+        return "completed"
+    return "leased"

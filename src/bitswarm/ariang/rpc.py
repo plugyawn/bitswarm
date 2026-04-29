@@ -1197,11 +1197,24 @@ def _safe_path_part(value: str) -> str:
 
 def _run_file_views(run: RunRecord) -> list[dict[str, JsonValue]]:
     total = max(1, int(run.settings.get("max_workers", 1)))
+    pending = sum(1 for seed in run.seeds if seed.state == "pending")
+    leased = sum(1 for seed in run.seeds if seed.state == "leased")
+    completed = sum(1 for seed in run.seeds if seed.state == "completed")
     rows: list[tuple[str, int, int]] = [
         (
             _display_path(run.name, "run", run.run_id, f"{run.status} {len(run.members)}/{total} joined"),
             total,
             min(len(run.members), total),
+        ),
+        (
+            _display_path(
+                run.name,
+                "seeds",
+                "summary",
+                f"pending {pending} leased {leased} completed {completed}",
+            ),
+            max(1, len(run.seeds)),
+            completed,
         ),
         (_display_path(run.name, "recipe", run.recipe_label, run.recipe_id), 1, 1),
         (_display_path(run.name, "profile", run.profile_label, run.profile_id), 1, 1),
@@ -1211,6 +1224,37 @@ def _run_file_views(run: RunRecord) -> list[dict[str, JsonValue]]:
         rows.append((_display_path(run.name, "setting", key, str(value)), 1, 1))
     for member in run.members:
         rows.append((_display_path(run.name, "member", member.actor, f"{member.role} {member.state}"), 1, 1))
+    for seed in sorted(run.seeds, key=lambda row: (row.issued_at_ms, row.seed_id))[:32]:
+        rows.append(
+            (
+                _display_path(
+                    run.name,
+                    "seed",
+                    seed.seed_id,
+                    f"{seed.state} {seed.sigma_id} issued {seed.issued_at_ms}",
+                ),
+                max(1, len(seed.rollouts)),
+                sum(1 for rollout in seed.rollouts if rollout.status in {"completed", "failed"}),
+            )
+        )
+        for rollout in seed.rollouts:
+            correctness = (
+                "pending"
+                if rollout.correct is None
+                else ("correct" if rollout.correct else "wrong")
+            )
+            rows.append(
+                (
+                    _display_path(
+                        run.name,
+                        "rollout",
+                        f"{seed.seed_id} {rollout.item_id}",
+                        f"{rollout.machine} {rollout.sign} {rollout.status} {correctness}",
+                    ),
+                    1,
+                    1 if rollout.status in {"completed", "failed"} else 0,
+                )
+            )
     return [
         {
             "index": str(index),

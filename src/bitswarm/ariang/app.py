@@ -9,7 +9,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .rpc import AriaNgBridge, DownloadFn
-from .runs import RunConfigurationError, RunCreateRequest, RunJoinRequest, RunNotFound, RunRegistry
+from .runs import (
+    RolloutUpdateRequest,
+    RunConfigurationError,
+    RunCreateRequest,
+    RunJoinRequest,
+    RunNotFound,
+    RunRegistry,
+)
 from .telemetry import TelemetryProvider
 
 
@@ -64,6 +71,20 @@ def create_ariang_app(
     async def ui_join_run(run_id: str, request: RunJoinRequest) -> dict[str, object]:
         try:
             run = await run_registry.join_run(run_id, request)
+        except RunNotFound as exc:
+            raise HTTPException(status_code=404, detail=f"run not found: {run_id}") from exc
+        except RunConfigurationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return run.model_dump(mode="json")
+
+    @app.post("/api/bitswarm/ui/runs/{run_id}/seeds/{seed_id}/rollouts")
+    async def ui_update_rollout(
+        run_id: str,
+        seed_id: str,
+        request: RolloutUpdateRequest,
+    ) -> dict[str, object]:
+        try:
+            run = await run_registry.update_rollout(run_id, seed_id, request)
         except RunNotFound as exc:
             raise HTTPException(status_code=404, detail=f"run not found: {run_id}") from exc
         except RunConfigurationError as exc:

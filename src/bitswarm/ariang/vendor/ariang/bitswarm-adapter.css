@@ -17,3 +17,21 @@ body.bitswarm-bridge .main-sidebar li.header:nth-of-type(2) {
   margin-bottom: 10px;
   min-height: 20px;
 }
+
+#bitswarm-run-modal .bitswarm-seed-detail-row > td {
+  background: #f9f9f9;
+}
+
+#bitswarm-run-modal .bitswarm-seed-panel {
+  margin-bottom: 0;
+}
+
+#bitswarm-run-modal .bitswarm-rollout-table {
+  margin-bottom: 0;
+}
+
+#bitswarm-run-modal .bitswarm-rollout-output {
+  max-width: 360px;
+  white-space: normal;
+  word-break: break-word;
+}

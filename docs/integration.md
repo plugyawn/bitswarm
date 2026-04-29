@@ -83,18 +83,24 @@ query parameter such as `?actor=B`, or by using the operator dropdown in the Run
 modal. The toolbar exposes Start Run and Runs controls in the same Bootstrap /
 AriaNg chrome. Start Run lets the host choose a recipe, profile, visibility,
 population, worker cap, and shortlist ratio. Runs lists active runs and lets
-other operators join. The registry is available through:
+other operators join. Runs also expose an expandable seed view: seeds are sorted
+by `issued_at_ms`, each seed can be expanded to its machine rollout table, and
+rollout rows use normal Bootstrap success/danger/warning table states for
+correct, wrong/failed, and pending/running rows. The registry is available
+through:
 
 ```text
 GET  /api/bitswarm/ui/catalog
 GET  /api/bitswarm/ui/runs
 POST /api/bitswarm/ui/runs
 POST /api/bitswarm/ui/runs/{run_id}/join
+POST /api/bitswarm/ui/runs/{run_id}/seeds/{seed_id}/rollouts
 ```
 
 Registered runs are projected into aria2 JSON-RPC responses as normal active
 tasks. AriaNg can therefore show running runs in the standard Downloading list,
-with members and settings visible through normal task details.
+with members, settings, issued seeds, and rollout summaries visible through
+normal task details.
 
 The UI can also render application progress such as training rounds, workers,
 rollouts, validation, or other workload state through an optional sidecar

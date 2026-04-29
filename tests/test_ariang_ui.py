@@ -214,6 +214,14 @@ async def test_ariang_run_registry_create_list_and_join() -> None:
                 "joined_at_ms": created["created_at_ms"],
             }
         ]
+        assert [seed["seed_id"] for seed in created["seeds"]] == [
+            "seed-000000",
+            "seed-000001",
+            "seed-000002",
+            "seed-000003",
+            "seed-000004",
+        ]
+        assert created["seeds"] == sorted(created["seeds"], key=lambda seed: seed["issued_at_ms"])
 
         join_response = await client.post(
             f"/api/bitswarm/ui/runs/{created['run_id']}/join",
@@ -249,6 +257,68 @@ async def test_ariang_run_registry_rejects_invalid_actor() -> None:
     assert "actor must be one of" in response.json()["detail"]
 
 
+async def test_ariang_run_registry_tracks_rollouts_per_seed() -> None:
+    app = create_ariang_app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ui") as client:
+        create_response = await client.post(
+            "/api/bitswarm/ui/runs",
+            json={
+                "actor": "A",
+                "name": "Rollout table test",
+                "recipe_id": "qwen05-arithmetic",
+                "profile_id": "smoke",
+                "visibility": "public",
+                "settings": {"population": 2, "max_workers": 14, "shortlist_ratio": 0.01},
+            },
+        )
+        run_id = create_response.json()["run_id"]
+        await client.post(
+            f"/api/bitswarm/ui/runs/{run_id}/seeds/seed-000001/rollouts",
+            json={
+                "machine": "B",
+                "item_id": "arith-0001",
+                "sign": "+",
+                "status": "running",
+                "expected": "42",
+                "output": "",
+            },
+        )
+        complete_response = await client.post(
+            f"/api/bitswarm/ui/runs/{run_id}/seeds/seed-000001/rollouts",
+            json={
+                "machine": "B",
+                "item_id": "arith-0001",
+                "sign": "+",
+                "status": "completed",
+                "correct": True,
+                "score": 1.0,
+                "expected": "42",
+                "output": "42",
+            },
+        )
+    assert complete_response.status_code == 200
+    run = complete_response.json()
+    seed = next(seed for seed in run["seeds"] if seed["seed_id"] == "seed-000001")
+    assert seed["state"] == "completed"
+    assert seed["rollouts"] == [
+        {
+            "rollout_id": "seed-000001:+:B:arith-0001",
+            "seed_id": "seed-000001",
+            "machine": "B",
+            "item_id": "arith-0001",
+            "sign": "+",
+            "status": "completed",
+            "issued_at_ms": seed["rollouts"][0]["issued_at_ms"],
+            "completed_at_ms": seed["rollouts"][0]["completed_at_ms"],
+            "correct": True,
+            "score": 1.0,
+            "expected": "42",
+            "output": "42",
+        }
+    ]
+
+
 async def test_ariang_run_registry_projects_runs_as_native_tasks() -> None:
     app = create_ariang_app()
     transport = httpx.ASGITransport(app=app)
@@ -266,6 +336,19 @@ async def test_ariang_run_registry_projects_runs_as_native_tasks() -> None:
         )
         run_id = create_response.json()["run_id"]
         await client.post(f"/api/bitswarm/ui/runs/{run_id}/join", json={"actor": "B"})
+        await client.post(
+            f"/api/bitswarm/ui/runs/{run_id}/seeds/seed-000000/rollouts",
+            json={
+                "machine": "B",
+                "item_id": "arith-0000",
+                "sign": "-",
+                "status": "completed",
+                "correct": False,
+                "score": 0.0,
+                "expected": "5",
+                "output": "4",
+            },
+        )
         active_response = await client.post(
             "/jsonrpc",
             json={
@@ -289,6 +372,8 @@ async def test_ariang_run_registry_projects_runs_as_native_tasks() -> None:
     assert task["totalLength"] == "14"
     assert task["completedLength"] == "2"
     assert any(file["path"].endswith("member/B/worker joined") for file in task["files"])
+    assert any("seed/seed-000000/completed" in file["path"] for file in task["files"])
+    assert any("rollout/seed-000000 arith-0000/B - completed wrong" in file["path"] for file in task["files"])
     assert status_response.json()["result"]["comment"] == "host A | Smoke | public | 2/14 joined"
     assert {peer["ip"] for peer in peers_response.json()["result"]} == {"A", "B"}
 

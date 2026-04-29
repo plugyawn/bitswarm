@@ -5,6 +5,7 @@
   var catalog = null;
   var runs = [];
   var refreshTimer = null;
+  var expandedRuns = {};
 
   function normalizeRoute() {
     var hash = window.location.hash || "";
@@ -149,7 +150,7 @@
       '            <table class="table table-striped table-hover">',
       '              <thead>',
       '                <tr>',
-      '                  <th>Run</th><th>Host</th><th>Recipe</th><th>Profile</th><th>Status</th><th>Members</th><th></th>',
+      '                  <th>Run</th><th>Host</th><th>Recipe</th><th>Profile</th><th>Status</th><th>Members</th><th>Seeds</th><th>Rollouts</th><th></th>',
       '                </tr>',
       '              </thead>',
       '              <tbody id="bitswarm-runs-body"></tbody>',
@@ -174,6 +175,13 @@
     document.getElementById("bitswarm-profile").addEventListener("change", syncProfileDefaults);
     document.getElementById("bitswarm-recipe").addEventListener("change", renderRecipeDetail);
     document.getElementById("bitswarm-runs-body").addEventListener("click", function (event) {
+      var toggle = event.target.closest("[data-toggle-seeds]");
+      if (toggle) {
+        expandedRuns[toggle.getAttribute("data-toggle-seeds")] =
+          !expandedRuns[toggle.getAttribute("data-toggle-seeds")];
+        renderRuns();
+        return;
+      }
       var button = event.target.closest("[data-join-run]");
       if (button) {
         joinRun(button.getAttribute("data-join-run"));
@@ -324,7 +332,7 @@
     }
     var actor = getStoredActor();
     if (!runs.length) {
-      body.innerHTML = '<tr><td colspan="7" class="text-muted">No active runs.</td></tr>';
+      body.innerHTML = '<tr><td colspan="9" class="text-muted">No active runs.</td></tr>';
       return;
     }
     body.innerHTML = runs.map(function (run) {
@@ -332,9 +340,12 @@
       var memberText = (run.members || []).map(function (member) {
         return member.actor + ":" + member.role;
       }).join(", ");
+      var seedSummary = summarizeSeeds(run);
+      var rolloutSummary = summarizeRollouts(run);
+      var expanded = !!expandedRuns[run.run_id];
       var action = joined ? '<span class="label label-success">Joined</span>' :
         '<button class="btn btn-xs btn-primary" data-join-run="' + escapeAttr(run.run_id) + '">Join</button>';
-      return '<tr>' +
+      var row = '<tr>' +
         '<td><strong>' + escapeHtml(run.name) + '</strong><br><small>' + escapeHtml(run.run_id) + '</small></td>' +
         '<td>' + escapeHtml(run.host_actor) + '</td>' +
         '<td>' + escapeHtml(run.recipe_label) + '</td>' +
@@ -342,9 +353,119 @@
         '<td>' + escapeHtml(run.status) + '</td>' +
         '<td><span title="' + escapeAttr(memberText) + '">' + escapeHtml(String((run.members || []).length)) +
         '</span></td>' +
-        '<td class="text-right">' + action + '</td>' +
+        '<td>' + escapeHtml(seedSummary) + '</td>' +
+        '<td>' + escapeHtml(rolloutSummary) + '</td>' +
+        '<td class="text-right">' +
+        '<button class="btn btn-xs btn-default" data-toggle-seeds="' + escapeAttr(run.run_id) + '">' +
+        (expanded ? 'Hide Seeds' : 'Seeds') + '</button> ' + action + '</td>' +
         '</tr>';
+      if (expanded) {
+        row += '<tr class="bitswarm-seed-detail-row"><td colspan="9">' + renderSeedDetails(run) + '</td></tr>';
+      }
+      return row;
     }).join("");
+  }
+
+  function summarizeSeeds(run) {
+    var counts = { pending: 0, leased: 0, completed: 0 };
+    (run.seeds || []).forEach(function (seed) {
+      counts[seed.state] = (counts[seed.state] || 0) + 1;
+    });
+    return "P " + counts.pending + " / L " + counts.leased + " / C " + counts.completed;
+  }
+
+  function summarizeRollouts(run) {
+    var pending = 0;
+    var completed = 0;
+    (run.seeds || []).forEach(function (seed) {
+      (seed.rollouts || []).forEach(function (rollout) {
+        if (rollout.status === "completed" || rollout.status === "failed") {
+          completed += 1;
+        } else {
+          pending += 1;
+        }
+      });
+    });
+    return "P " + pending + " / C " + completed;
+  }
+
+  function renderSeedDetails(run) {
+    var seeds = (run.seeds || []).slice().sort(function (left, right) {
+      if (left.issued_at_ms !== right.issued_at_ms) {
+        return left.issued_at_ms - right.issued_at_ms;
+      }
+      return left.seed_id.localeCompare(right.seed_id);
+    });
+    if (!seeds.length) {
+      return '<div class="text-muted">No seeds issued.</div>';
+    }
+    return '<div class="panel-group bitswarm-seed-panel">' + seeds.map(function (seed) {
+      var pending = (seed.rollouts || []).filter(function (row) {
+        return row.status !== "completed" && row.status !== "failed";
+      }).length;
+      var completed = (seed.rollouts || []).length - pending;
+      return '<div class="panel panel-default">' +
+        '<div class="panel-heading">' +
+        '<a data-toggle="collapse" href="#bitswarm-seed-' + escapeAttr(run.run_id + '-' + seed.seed_id) + '">' +
+        '<strong>' + escapeHtml(seed.seed_id) + '</strong> ' +
+        '<span class="text-muted">' + escapeHtml(seed.sigma_id) + ' · issued ' +
+        escapeHtml(formatTimestamp(seed.issued_at_ms)) + ' · ' + escapeHtml(seed.state) +
+        ' · pending ' + pending + ' · completed ' + completed + '</span>' +
+        '</a>' +
+        '</div>' +
+        '<div id="bitswarm-seed-' + escapeAttr(run.run_id + '-' + seed.seed_id) +
+        '" class="panel-collapse collapse">' +
+        '<div class="panel-body">' + renderRolloutTable(seed) + '</div>' +
+        '</div>' +
+        '</div>';
+    }).join("") + '</div>';
+  }
+
+  function renderRolloutTable(seed) {
+    var rollouts = (seed.rollouts || []).slice().sort(function (left, right) {
+      if (left.issued_at_ms !== right.issued_at_ms) {
+        return left.issued_at_ms - right.issued_at_ms;
+      }
+      return left.rollout_id.localeCompare(right.rollout_id);
+    });
+    if (!rollouts.length) {
+      return '<div class="text-muted">No rollouts reported yet for this seed.</div>';
+    }
+    return '<div class="table-responsive"><table class="table table-condensed table-bordered bitswarm-rollout-table">' +
+      '<thead><tr><th>Machine</th><th>Item</th><th>Sign</th><th>Status</th><th>Issued</th><th>Completed</th>' +
+      '<th>Score</th><th>Expected</th><th>Output</th></tr></thead><tbody>' +
+      rollouts.map(function (rollout) {
+        var cls = "";
+        if (rollout.correct === true) {
+          cls = "success";
+        } else if (rollout.correct === false || rollout.status === "failed") {
+          cls = "danger";
+        } else if (rollout.status === "pending" || rollout.status === "running") {
+          cls = "warning";
+        }
+        return '<tr class="' + cls + '">' +
+          '<td>' + escapeHtml(rollout.machine) + '</td>' +
+          '<td>' + escapeHtml(rollout.item_id) + '</td>' +
+          '<td>' + escapeHtml(rollout.sign) + '</td>' +
+          '<td>' + escapeHtml(rollout.status) + '</td>' +
+          '<td>' + escapeHtml(formatTimestamp(rollout.issued_at_ms)) + '</td>' +
+          '<td>' + escapeHtml(rollout.completed_at_ms ? formatTimestamp(rollout.completed_at_ms) : '-') + '</td>' +
+          '<td>' + escapeHtml(rollout.score == null ? '-' : String(rollout.score)) + '</td>' +
+          '<td>' + escapeHtml(rollout.expected || '') + '</td>' +
+          '<td class="bitswarm-rollout-output">' + escapeHtml(rollout.output || '') + '</td>' +
+          '</tr>';
+      }).join("") + '</tbody></table></div>';
+  }
+
+  function formatTimestamp(value) {
+    if (!value) {
+      return "-";
+    }
+    var date = new Date(Number(value));
+    if (Number.isNaN(date.getTime())) {
+      return String(value);
+    }
+    return date.toLocaleTimeString();
   }
 
   function joinRun(runId) {
