@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -16,6 +17,7 @@ from .runs import (
     RunJoinRequest,
     RunNotFound,
     RunRegistry,
+    StartupCheckUpdateRequest,
 )
 from .telemetry import TelemetryProvider
 
@@ -26,6 +28,7 @@ def create_ariang_app(
     default_output_dir: Path | None = None,
     telemetry_json: Path | None = None,
     telemetry_url: str | None = None,
+    auto_bootstrap_runs: bool = True,
 ) -> FastAPI:
     """Create a local AriaNg UI backed by a Bitswarm JSON-RPC bridge."""
     static_root = Path(__file__).parent / "vendor" / "ariang"
@@ -41,6 +44,7 @@ def create_ariang_app(
     app.state.bitswarm_ariang_bridge = state
     app.state.bitswarm_telemetry_provider = telemetry
     app.state.bitswarm_run_registry = run_registry
+    app.state.bitswarm_bootstrap_tasks = {}
 
     @app.get("/api/health")
     async def health() -> dict[str, bool]:
@@ -65,6 +69,10 @@ def create_ariang_app(
             run = await run_registry.create_run(request)
         except RunConfigurationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if auto_bootstrap_runs:
+            app.state.bitswarm_bootstrap_tasks[run.run_id] = asyncio.create_task(
+                run_registry.bootstrap_run(run.run_id)
+            )
         return run.model_dump(mode="json")
 
     @app.post("/api/bitswarm/ui/runs/{run_id}/join")
@@ -85,6 +93,20 @@ def create_ariang_app(
     ) -> dict[str, object]:
         try:
             run = await run_registry.update_rollout(run_id, seed_id, request)
+        except RunNotFound as exc:
+            raise HTTPException(status_code=404, detail=f"run not found: {run_id}") from exc
+        except RunConfigurationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return run.model_dump(mode="json")
+
+    @app.post("/api/bitswarm/ui/runs/{run_id}/startup/{stage_id}")
+    async def ui_update_startup_check(
+        run_id: str,
+        stage_id: str,
+        request: StartupCheckUpdateRequest,
+    ) -> dict[str, object]:
+        try:
+            run = await run_registry.update_startup_check(run_id, stage_id, request)
         except RunNotFound as exc:
             raise HTTPException(status_code=404, detail=f"run not found: {run_id}") from exc
         except RunConfigurationError as exc:

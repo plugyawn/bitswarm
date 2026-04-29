@@ -83,24 +83,38 @@ query parameter such as `?actor=B`, or by using the operator dropdown in the Run
 modal. The toolbar exposes Start Run and Runs controls in the same Bootstrap /
 AriaNg chrome. Start Run lets the host choose a recipe, profile, visibility,
 population, worker cap, and shortlist ratio. Runs lists active runs and lets
-other operators join. Runs also expose an expandable seed view: seeds are sorted
-by `issued_at_ms`, each seed can be expanded to its machine rollout table, and
-rollout rows use normal Bootstrap success/danger/warning table states for
-correct, wrong/failed, and pending/running rows. The registry is available
-through:
+other operators join. A newly created run starts in `preparing` and exposes
+torrent-style startup health checks before it goes green:
+
+- downloading or verifying base weights
+- connecting and confirming the deterministic seed manifest
+- running an evaluator smoke check
+
+These checks are local operator presentation state. External runtimes can report
+real progress through the startup endpoint; the local bridge also drives a short
+demo bootstrap so a standalone UI visibly moves from preparing to running.
+
+Runs also expose an expandable seed view: seeds are sorted by `issued_at_ms`,
+each seed can be expanded to its machine rollout table, and rollout rows use
+normal Bootstrap success/danger/warning table states for correct, wrong/failed,
+and pending/running rows. The registry is available through:
 
 ```text
 GET  /api/bitswarm/ui/catalog
 GET  /api/bitswarm/ui/runs
 POST /api/bitswarm/ui/runs
 POST /api/bitswarm/ui/runs/{run_id}/join
+POST /api/bitswarm/ui/runs/{run_id}/startup/{stage_id}
 POST /api/bitswarm/ui/runs/{run_id}/seeds/{seed_id}/rollouts
 ```
 
 Registered runs are projected into aria2 JSON-RPC responses as normal active
 tasks. AriaNg can therefore show running runs in the standard Downloading list,
-with members, settings, issued seeds, and rollout summaries visible through
-normal task details.
+with startup checks, members, settings, issued seeds, and rollout summaries
+visible through normal task details. While a run is preparing, the projected
+task progress is the aggregate startup check progress, so the stock AriaNg
+progress bar behaves like torrent file checking. Once startup checks complete,
+the task switches to running and shows member/join progress.
 
 The UI can also render application progress such as training rounds, workers,
 rollouts, validation, or other workload state through an optional sidecar

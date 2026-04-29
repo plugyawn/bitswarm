@@ -150,7 +150,7 @@
       '            <table class="table table-striped table-hover">',
       '              <thead>',
       '                <tr>',
-      '                  <th>Run</th><th>Host</th><th>Recipe</th><th>Profile</th><th>Status</th><th>Members</th><th>Seeds</th><th>Rollouts</th><th></th>',
+      '                  <th>Run</th><th>Host</th><th>Recipe</th><th>Profile</th><th>Status</th><th>Startup</th><th>Members</th><th>Seeds</th><th>Rollouts</th><th></th>',
       '                </tr>',
       '              </thead>',
       '              <tbody id="bitswarm-runs-body"></tbody>',
@@ -332,7 +332,7 @@
     }
     var actor = getStoredActor();
     if (!runs.length) {
-      body.innerHTML = '<tr><td colspan="9" class="text-muted">No active runs.</td></tr>';
+      body.innerHTML = '<tr><td colspan="10" class="text-muted">No active runs.</td></tr>';
       return;
     }
     body.innerHTML = runs.map(function (run) {
@@ -342,6 +342,7 @@
       }).join(", ");
       var seedSummary = summarizeSeeds(run);
       var rolloutSummary = summarizeRollouts(run);
+      var startup = startupProgress(run);
       var expanded = !!expandedRuns[run.run_id];
       var action = joined ? '<span class="label label-success">Joined</span>' :
         '<button class="btn btn-xs btn-primary" data-join-run="' + escapeAttr(run.run_id) + '">Join</button>';
@@ -350,7 +351,8 @@
         '<td>' + escapeHtml(run.host_actor) + '</td>' +
         '<td>' + escapeHtml(run.recipe_label) + '</td>' +
         '<td>' + escapeHtml(run.profile_label) + '</td>' +
-        '<td>' + escapeHtml(run.status) + '</td>' +
+        '<td>' + statusLabel(run.status) + '</td>' +
+        '<td>' + renderStartupSummary(run, startup) + '</td>' +
         '<td><span title="' + escapeAttr(memberText) + '">' + escapeHtml(String((run.members || []).length)) +
         '</span></td>' +
         '<td>' + escapeHtml(seedSummary) + '</td>' +
@@ -360,10 +362,56 @@
         (expanded ? 'Hide Seeds' : 'Seeds') + '</button> ' + action + '</td>' +
         '</tr>';
       if (expanded) {
-        row += '<tr class="bitswarm-seed-detail-row"><td colspan="9">' + renderSeedDetails(run) + '</td></tr>';
+        row += '<tr class="bitswarm-seed-detail-row"><td colspan="10">' + renderSeedDetails(run) + '</td></tr>';
       }
       return row;
     }).join("");
+  }
+
+  function statusLabel(status) {
+    var cls = "label-default";
+    if (status === "running" || status === "complete") {
+      cls = "label-success";
+    } else if (status === "preparing") {
+      cls = "label-info";
+    } else if (status === "error") {
+      cls = "label-danger";
+    } else if (status === "paused") {
+      cls = "label-warning";
+    }
+    return '<span class="label ' + cls + '">' + escapeHtml(status || "unknown") + '</span>';
+  }
+
+  function startupProgress(run) {
+    var checks = run.startup_checks || [];
+    var current = 0;
+    var total = 0;
+    checks.forEach(function (check) {
+      total += Math.max(Number(check.total || 0), 1);
+      current += Math.max(Math.min(Number(check.current || 0), Number(check.total || 1)), 0);
+    });
+    var percent = total ? Math.round((current / total) * 100) : 100;
+    return { current: current, total: total || 1, percent: Math.max(0, Math.min(percent, 100)) };
+  }
+
+  function currentStartupCheck(run) {
+    var checks = run.startup_checks || [];
+    return checks.filter(function (check) { return check.state === "running"; })[0] ||
+      checks.filter(function (check) { return check.state === "pending"; })[0] ||
+      checks[checks.length - 1];
+  }
+
+  function renderStartupSummary(run, progress) {
+    var check = currentStartupCheck(run);
+    var cls = run.status === "running" || run.status === "complete" ? "progress-bar-success" :
+      (run.status === "error" ? "progress-bar-danger" : "progress-bar-info progress-bar-striped active");
+    var label = check ? check.label + " " + check.current + "/" + check.total : "Ready";
+    return '<div class="bitswarm-startup-summary">' +
+      '<div class="progress bitswarm-mini-progress">' +
+      '<div class="progress-bar ' + cls + '" role="progressbar" style="width:' + progress.percent + '%"></div>' +
+      '</div>' +
+      '<small>' + escapeHtml(label) + ' · ' + progress.percent + '%</small>' +
+      '</div>';
   }
 
   function summarizeSeeds(run) {
@@ -397,9 +445,9 @@
       return left.seed_id.localeCompare(right.seed_id);
     });
     if (!seeds.length) {
-      return '<div class="text-muted">No seeds issued.</div>';
+      return renderStartupDetails(run) + '<div class="text-muted">No seeds issued.</div>';
     }
-    return '<div class="panel-group bitswarm-seed-panel">' + seeds.map(function (seed) {
+    return renderStartupDetails(run) + '<div class="panel-group bitswarm-seed-panel">' + seeds.map(function (seed) {
       var pending = (seed.rollouts || []).filter(function (row) {
         return row.status !== "completed" && row.status !== "failed";
       }).length;
@@ -419,6 +467,30 @@
         '</div>' +
         '</div>';
     }).join("") + '</div>';
+  }
+
+  function renderStartupDetails(run) {
+    var checks = run.startup_checks || [];
+    if (!checks.length) {
+      return "";
+    }
+    return '<div class="panel panel-default bitswarm-startup-panel">' +
+      '<div class="panel-heading"><strong>Startup health</strong> <span class="text-muted">model, seed manifest, and evaluator smoke</span></div>' +
+      '<div class="panel-body">' + checks.map(function (check) {
+        var percent = Math.round((Number(check.current || 0) / Math.max(Number(check.total || 1), 1)) * 100);
+        percent = Math.max(0, Math.min(percent, 100));
+        var cls = check.state === "complete" ? "progress-bar-success" :
+          (check.state === "failed" ? "progress-bar-danger" :
+            (check.state === "running" ? "progress-bar-info progress-bar-striped active" : "progress-bar-default"));
+        return '<div class="bitswarm-startup-check">' +
+          '<div><strong>' + escapeHtml(check.label) + '</strong> ' +
+          '<span class="label label-default">' + escapeHtml(check.state) + '</span> ' +
+          '<small class="text-muted">' + escapeHtml(check.detail || '') + '</small></div>' +
+          '<div class="progress bitswarm-check-progress">' +
+          '<div class="progress-bar ' + cls + '" role="progressbar" style="width:' + percent + '%">' +
+          escapeHtml(String(percent)) + '%</div></div>' +
+          '</div>';
+      }).join("") + '</div></div>';
   }
 
   function renderRolloutTable(seed) {
@@ -528,7 +600,7 @@
       hideStockSettings();
       ensureRunButtons();
       refreshRuns();
-    }, 5000);
+    }, 1000);
     window.addEventListener("beforeunload", function () {
       if (refreshTimer) {
         window.clearInterval(refreshTimer);

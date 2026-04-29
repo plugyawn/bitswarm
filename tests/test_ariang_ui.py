@@ -183,7 +183,7 @@ async def test_ariang_default_telemetry_is_disabled() -> None:
 
 
 async def test_ariang_run_registry_create_list_and_join() -> None:
-    app = create_ariang_app()
+    app = create_ariang_app(auto_bootstrap_runs=False)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://ui") as client:
         catalog_response = await client.get("/api/bitswarm/ui/catalog")
@@ -205,6 +205,14 @@ async def test_ariang_run_registry_create_list_and_join() -> None:
         )
         assert create_response.status_code == 200
         created = create_response.json()
+        assert created["status"] == "preparing"
+        assert [check["id"] for check in created["startup_checks"]] == [
+            "base-weights",
+            "seed-handshake",
+            "eval-smoke",
+        ]
+        assert created["startup_checks"][0]["label"] == "Downloading base weights"
+        assert created["startup_checks"][1]["total"] == 5
         assert created["host_actor"] == "A"
         assert created["members"] == [
             {
@@ -239,7 +247,7 @@ async def test_ariang_run_registry_create_list_and_join() -> None:
 
 
 async def test_ariang_run_registry_rejects_invalid_actor() -> None:
-    app = create_ariang_app()
+    app = create_ariang_app(auto_bootstrap_runs=False)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://ui") as client:
         response = await client.post(
@@ -257,8 +265,73 @@ async def test_ariang_run_registry_rejects_invalid_actor() -> None:
     assert "actor must be one of" in response.json()["detail"]
 
 
+async def test_ariang_run_startup_checks_gate_running_status() -> None:
+    app = create_ariang_app(auto_bootstrap_runs=False)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ui") as client:
+        create_response = await client.post(
+            "/api/bitswarm/ui/runs",
+            json={
+                "actor": "A",
+                "name": "Startup health test",
+                "recipe_id": "qwen05-arithmetic",
+                "profile_id": "smoke",
+                "visibility": "public",
+                "settings": {"population": 3, "max_workers": 14, "shortlist_ratio": 0.01},
+            },
+        )
+        run_id = create_response.json()["run_id"]
+        base_response = await client.post(
+            f"/api/bitswarm/ui/runs/{run_id}/startup/base-weights",
+            json={"state": "running", "current": 50, "detail": "checking cached model shards"},
+        )
+        await client.post(
+            f"/api/bitswarm/ui/runs/{run_id}/startup/base-weights",
+            json={"state": "complete", "current": 100, "detail": "base weights verified"},
+        )
+        await client.post(
+            f"/api/bitswarm/ui/runs/{run_id}/startup/seed-handshake",
+            json={"state": "complete", "current": 3, "detail": "seed manifest confirmed"},
+        )
+        final_response = await client.post(
+            f"/api/bitswarm/ui/runs/{run_id}/startup/eval-smoke",
+            json={"state": "complete", "current": 1, "detail": "evaluator smoke passed"},
+        )
+    assert base_response.status_code == 200
+    base = next(check for check in base_response.json()["startup_checks"] if check["id"] == "base-weights")
+    assert base["state"] == "running"
+    assert base["current"] == 50
+    assert base_response.json()["status"] == "preparing"
+    assert final_response.status_code == 200
+    assert final_response.json()["status"] == "running"
+
+
+async def test_ariang_run_startup_rejects_invalid_progress() -> None:
+    app = create_ariang_app(auto_bootstrap_runs=False)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ui") as client:
+        create_response = await client.post(
+            "/api/bitswarm/ui/runs",
+            json={
+                "actor": "A",
+                "name": "Startup invalid progress",
+                "recipe_id": "qwen05-arithmetic",
+                "profile_id": "smoke",
+                "visibility": "public",
+                "settings": {},
+            },
+        )
+        run_id = create_response.json()["run_id"]
+        response = await client.post(
+            f"/api/bitswarm/ui/runs/{run_id}/startup/eval-smoke",
+            json={"state": "running", "current": 2, "total": 1},
+        )
+    assert response.status_code == 400
+    assert "current exceeds total" in response.json()["detail"]
+
+
 async def test_ariang_run_registry_tracks_rollouts_per_seed() -> None:
-    app = create_ariang_app()
+    app = create_ariang_app(auto_bootstrap_runs=False)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://ui") as client:
         create_response = await client.post(
@@ -320,7 +393,7 @@ async def test_ariang_run_registry_tracks_rollouts_per_seed() -> None:
 
 
 async def test_ariang_run_registry_projects_runs_as_native_tasks() -> None:
-    app = create_ariang_app()
+    app = create_ariang_app(auto_bootstrap_runs=False)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://ui") as client:
         create_response = await client.post(
@@ -369,12 +442,15 @@ async def test_ariang_run_registry_projects_runs_as_native_tasks() -> None:
             json={"jsonrpc": "2.0", "id": "peers", "method": "aria2.getPeers", "params": [task["gid"]]},
         )
     assert task["status"] == "active"
-    assert task["totalLength"] == "14"
-    assert task["completedLength"] == "2"
+    assert task["totalLength"] == "106"
+    assert task["completedLength"] == "0"
     assert any(file["path"].endswith("member/B/worker joined") for file in task["files"])
+    assert any("startup/Downloading base weights/pending 0 / 100" in file["path"] for file in task["files"])
     assert any("seed/seed-000000/completed" in file["path"] for file in task["files"])
     assert any("rollout/seed-000000 arith-0000/B - completed wrong" in file["path"] for file in task["files"])
-    assert status_response.json()["result"]["comment"] == "host A | Smoke | public | 2/14 joined"
+    assert status_response.json()["result"]["comment"] == (
+        "host A | Smoke | public | startup downloading base weights 0/100 | 2/14 joined"
+    )
     assert {peer["ip"] for peer in peers_response.json()["result"]} == {"A", "B"}
 
 

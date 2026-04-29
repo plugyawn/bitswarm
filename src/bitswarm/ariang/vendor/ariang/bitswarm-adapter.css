@@ -26,6 +26,27 @@ body.bitswarm-bridge .main-sidebar li.header:nth-of-type(2) {
   margin-bottom: 0;
 }
 
+#bitswarm-run-modal .bitswarm-mini-progress,
+#bitswarm-run-modal .bitswarm-check-progress {
+  margin-bottom: 4px;
+}
+
+#bitswarm-run-modal .bitswarm-mini-progress {
+  height: 8px;
+}
+
+#bitswarm-run-modal .bitswarm-startup-summary {
+  min-width: 180px;
+}
+
+#bitswarm-run-modal .bitswarm-startup-panel {
+  margin-bottom: 10px;
+}
+
+#bitswarm-run-modal .bitswarm-startup-check + .bitswarm-startup-check {
+  margin-top: 8px;
+}
+
 #bitswarm-run-modal .bitswarm-rollout-table {
   margin-bottom: 0;
 }

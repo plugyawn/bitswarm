@@ -47,6 +47,18 @@ class RunMember(StrictUiModel):
     joined_at_ms: StrictInt = Field(ge=0)
 
 
+class StartupCheck(StrictUiModel):
+    id: StrictStr = Field(min_length=1)
+    label: StrictStr = Field(min_length=1)
+    state: Literal["pending", "running", "complete", "failed"] = "pending"
+    current: StrictInt = Field(ge=0)
+    total: StrictInt = Field(gt=0)
+    detail: StrictStr = ""
+    started_at_ms: StrictInt | None = Field(default=None, ge=0)
+    updated_at_ms: StrictInt = Field(ge=0)
+    completed_at_ms: StrictInt | None = Field(default=None, ge=0)
+
+
 class RolloutRecord(StrictUiModel):
     rollout_id: StrictStr = Field(min_length=1)
     seed_id: StrictStr = Field(min_length=1)
@@ -79,9 +91,10 @@ class RunRecord(StrictUiModel):
     profile_label: StrictStr = Field(min_length=1)
     host_actor: StrictStr = Field(min_length=1)
     visibility: Literal["public", "unlisted"] = "public"
-    status: Literal["running", "paused", "complete", "error"] = "running"
+    status: Literal["preparing", "running", "paused", "complete", "error"] = "preparing"
     created_at_ms: StrictInt = Field(ge=0)
     updated_at_ms: StrictInt = Field(ge=0)
+    startup_checks: list[StartupCheck] = Field(default_factory=list)
     members: list[RunMember] = Field(default_factory=list)
     seeds: list[SeedRecord] = Field(default_factory=list)
     settings: dict[str, JsonScalar] = Field(default_factory=dict)
@@ -109,6 +122,13 @@ class RolloutUpdateRequest(StrictUiModel):
     score: StrictFloat | None = None
     expected: StrictStr = ""
     output: StrictStr = ""
+
+
+class StartupCheckUpdateRequest(StrictUiModel):
+    state: Literal["pending", "running", "complete", "failed"] | None = None
+    current: StrictInt | None = Field(default=None, ge=0)
+    total: StrictInt | None = Field(default=None, gt=0)
+    detail: StrictStr | None = None
 
 
 class RunCatalog(StrictUiModel):
@@ -162,9 +182,14 @@ class RunRegistry:
             profile_label=profile.label,
             host_actor=actor,
             visibility=request.visibility,
-            status="running",
+            status="preparing",
             created_at_ms=now,
             updated_at_ms=now,
+            startup_checks=_make_startup_checks(
+                recipe=recipe,
+                population=int(settings.get("population", profile.population)),
+                now_ms=now,
+            ),
             members=[RunMember(actor=actor, role="host", state="hosting", joined_at_ms=now)],
             seeds=_make_seed_records(
                 population=int(settings.get("population", profile.population)),
@@ -234,6 +259,139 @@ class RunRegistry:
             updated = run.model_copy(update={"seeds": seeds, "updated_at_ms": now})
             self._runs[run_id] = updated
             return updated
+
+    async def update_startup_check(
+        self,
+        run_id: str,
+        stage_id: str,
+        request: StartupCheckUpdateRequest,
+    ) -> RunRecord:
+        async with self._lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                raise RunNotFound(run_id)
+            now = _now_ms()
+            checks: list[StartupCheck] = []
+            found = False
+            for check in run.startup_checks:
+                if check.id != stage_id:
+                    checks.append(check)
+                    continue
+                found = True
+                state = request.state or check.state
+                total = request.total if request.total is not None else check.total
+                current = request.current if request.current is not None else check.current
+                if current > total:
+                    raise RunConfigurationError(
+                        f"startup check {stage_id} current exceeds total: {current}>{total}"
+                    )
+                started_at_ms = check.started_at_ms
+                if state == "running" and started_at_ms is None:
+                    started_at_ms = now
+                completed_at_ms = check.completed_at_ms
+                if state in {"complete", "failed"}:
+                    completed_at_ms = now
+                elif check.state in {"complete", "failed"} and state not in {"complete", "failed"}:
+                    completed_at_ms = None
+                checks.append(
+                    check.model_copy(
+                        update={
+                            "state": state,
+                            "current": current,
+                            "total": total,
+                            "detail": request.detail if request.detail is not None else check.detail,
+                            "started_at_ms": started_at_ms,
+                            "updated_at_ms": now,
+                            "completed_at_ms": completed_at_ms,
+                        }
+                    )
+                )
+            if not found:
+                raise RunConfigurationError(f"unknown startup check: {stage_id}")
+            status = _run_status_from_startup(checks, run.status)
+            updated = run.model_copy(
+                update={"startup_checks": checks, "status": status, "updated_at_ms": now}
+            )
+            self._runs[run_id] = updated
+            return updated
+
+    async def bootstrap_run(self, run_id: str, *, delay_seconds: float = 0.35) -> RunRecord | None:
+        """Drive the local UI bridge startup checks for a newly created run.
+
+        This is local operator bridge state, not public Bitswarm protocol state.
+        External runtimes can instead call ``update_startup_check`` directly.
+        """
+
+        run = await self.get_run(run_id)
+        if run is None:
+            return None
+        population = max(1, int(run.settings.get("population", len(run.seeds) or 1)))
+        await self.update_startup_check(
+            run_id,
+            "base-weights",
+            StartupCheckUpdateRequest(
+                state="running",
+                current=0,
+                detail=f"checking {run.recipe_label} model files",
+            ),
+        )
+        for current in (20, 45, 70, 100):
+            await asyncio.sleep(delay_seconds)
+            await self.update_startup_check(
+                run_id,
+                "base-weights",
+                StartupCheckUpdateRequest(
+                    state="complete" if current == 100 else "running",
+                    current=current,
+                    detail=(
+                        "base weights present and hashable"
+                        if current == 100
+                        else "checking cached model shards"
+                    ),
+                ),
+            )
+        await self.update_startup_check(
+            run_id,
+            "seed-handshake",
+            StartupCheckUpdateRequest(
+                state="running",
+                current=0,
+                detail="announcing deterministic seed manifest",
+            ),
+        )
+        step = max(1, population // 4)
+        current = 0
+        while current < population:
+            await asyncio.sleep(delay_seconds)
+            current = min(population, current + step)
+            await self.update_startup_check(
+                run_id,
+                "seed-handshake",
+                StartupCheckUpdateRequest(
+                    state="complete" if current == population else "running",
+                    current=current,
+                    detail=(
+                        "seed manifest confirmed"
+                        if current == population
+                        else "confirming issued seed order"
+                    ),
+                ),
+            )
+        await self.update_startup_check(
+            run_id,
+            "eval-smoke",
+            StartupCheckUpdateRequest(
+                state="running",
+                current=0,
+                detail=f"smoking {run.recipe_label} evaluator",
+            ),
+        )
+        await asyncio.sleep(delay_seconds)
+        return await self.update_startup_check(
+            run_id,
+            "eval-smoke",
+            StartupCheckUpdateRequest(state="complete", current=1, detail="evaluator smoke passed"),
+        )
 
     async def get_run(self, run_id: str) -> RunRecord | None:
         async with self._lock:
@@ -342,6 +500,53 @@ def _make_seed_records(*, population: int, now_ms: int) -> list[SeedRecord]:
         )
         for index in range(max(0, population))
     ]
+
+
+def _make_startup_checks(*, recipe: RunRecipe, population: int, now_ms: int) -> list[StartupCheck]:
+    return [
+        StartupCheck(
+            id="base-weights",
+            label="Downloading base weights",
+            state="pending",
+            current=0,
+            total=100,
+            detail=f"model {recipe.model}",
+            updated_at_ms=now_ms,
+        ),
+        StartupCheck(
+            id="seed-handshake",
+            label="Connecting and confirming seeds",
+            state="pending",
+            current=0,
+            total=max(1, population),
+            detail="waiting to confirm deterministic seed manifest",
+            updated_at_ms=now_ms,
+        ),
+        StartupCheck(
+            id="eval-smoke",
+            label="Confirming eval pipeline smoke",
+            state="pending",
+            current=0,
+            total=1,
+            detail=f"evaluator {recipe.evaluator}",
+            updated_at_ms=now_ms,
+        ),
+    ]
+
+
+def _run_status_from_startup(
+    checks: list[StartupCheck],
+    current_status: str,
+) -> Literal["preparing", "running", "paused", "complete", "error"]:
+    if current_status in {"paused", "complete", "error"} and not any(
+        check.state == "failed" for check in checks
+    ):
+        return current_status  # Preserve explicit operator or terminal state.
+    if any(check.state == "failed" for check in checks):
+        return "error"
+    if checks and all(check.state == "complete" for check in checks):
+        return "running"
+    return "preparing"
 
 
 def _seed_state(rollouts: list[RolloutRecord]) -> Literal["pending", "leased", "completed"]:

@@ -99,11 +99,14 @@ The same bridge also exposes a shared local run lobby for browser tabs pointed
 at the same UI server. Operators identify themselves as `A` through `O` with
 `?actor=A` or the operator dropdown. One operator can open Start Run, choose a
 recipe/profile, and start a run; other operators refresh or open Runs and join
-that run. The Runs view expands each run into issued seeds sorted by issue time,
-and each seed expands into pending/completed rollout rows per machine with
-green/red Bootstrap table states for correct and wrong results. Run state is
-also projected into AriaNg as ordinary active task rows, so the running run
-appears in the normal download-manager list.
+that run. Newly started runs first show torrent-style startup health: base
+weights download/verification, seed manifest confirmation, and evaluator smoke
+validation. Those startup checks drive the normal AriaNg progress bar until the
+run goes green and switches to running. The Runs view expands each run into
+issued seeds sorted by issue time, and each seed expands into pending/completed
+rollout rows per machine with green/red Bootstrap table states for correct and
+wrong results. Run state is also projected into AriaNg as ordinary active task
+rows, so the running run appears in the normal download-manager list.
 
 Applications can project training or other workload progress into the UI with a
 separate sidecar presentation feed:

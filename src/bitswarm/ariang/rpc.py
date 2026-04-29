@@ -827,10 +827,11 @@ class AriaNgBridge:
         *,
         fields: list[Any] | None = None,
     ) -> dict[str, JsonValue]:
-        total = max(1, int(run.settings.get("max_workers", 1)))
-        completed = min(len(run.members), total)
+        completed, total = _run_progress(run)
+        max_workers = max(1, int(run.settings.get("max_workers", 1)))
         status = _run_status(run.status)
         gid = _run_gid(run.run_id)
+        num_pieces = max(1, min(64, total))
         view: dict[str, JsonValue] = {
             "gid": gid,
             "status": status,
@@ -844,13 +845,13 @@ class AriaNgBridge:
             "seeder": "true" if status == "complete" else "false",
             "dir": f"bitswarm://runs/{run.run_id}",
             "files": _run_file_views(run),
-            "bitfield": _bitfield(completed, total),
-            "numPieces": str(total),
+            "bitfield": _bitfield(_scaled_pieces(completed, total), num_pieces),
+            "numPieces": str(num_pieces),
             "pieceLength": "1",
             "errorCode": "1" if status == "error" else "0",
             "errorMessage": "",
             "verifiedLength": str(completed),
-            "verifyIntegrityPending": "false",
+            "verifyIntegrityPending": "true" if run.status == "preparing" else "false",
             "infoHash": gid * 2 + gid[:8],
             "bittorrent": {
                 "announceList": [],
@@ -863,7 +864,8 @@ class AriaNgBridge:
                     f"host {run.host_actor}",
                     run.profile_label,
                     run.visibility,
-                    f"{len(run.members)}/{total} joined",
+                    _run_phase_summary(run),
+                    f"{len(run.members)}/{max_workers} joined",
                 ]
             ),
         }
@@ -1059,7 +1061,7 @@ def _telemetry_status(state: str) -> str:
 
 def _run_status(state: str) -> str:
     normalized = state.strip().lower()
-    if normalized == "running":
+    if normalized in {"preparing", "running"}:
         return "active"
     if normalized == "paused":
         return "paused"
@@ -1084,6 +1086,24 @@ def _scaled_pieces(completed: int, total: int) -> int:
     if total <= 0:
         return 0
     return max(0, min(total_pieces, int(round(total_pieces * (completed / total)))))
+
+
+def _run_progress(run: RunRecord) -> tuple[int, int]:
+    if run.status == "preparing" and run.startup_checks:
+        total = sum(max(check.total, 1) for check in run.startup_checks)
+        completed = sum(max(0, min(check.current, check.total)) for check in run.startup_checks)
+        return completed, max(total, 1)
+    total = max(1, int(run.settings.get("max_workers", 1)))
+    return min(len(run.members), total), total
+
+
+def _run_phase_summary(run: RunRecord) -> str:
+    if run.status == "preparing" and run.startup_checks:
+        running = next((check for check in run.startup_checks if check.state == "running"), None)
+        pending = next((check for check in run.startup_checks if check.state == "pending"), None)
+        current = running or pending or run.startup_checks[-1]
+        return f"startup {current.label.lower()} {current.current}/{current.total}"
+    return run.status
 
 
 def _rate_to_int(value: str) -> int:
@@ -1196,15 +1216,21 @@ def _safe_path_part(value: str) -> str:
 
 
 def _run_file_views(run: RunRecord) -> list[dict[str, JsonValue]]:
-    total = max(1, int(run.settings.get("max_workers", 1)))
+    completed_run, total_run = _run_progress(run)
+    max_workers = max(1, int(run.settings.get("max_workers", 1)))
     pending = sum(1 for seed in run.seeds if seed.state == "pending")
     leased = sum(1 for seed in run.seeds if seed.state == "leased")
     completed = sum(1 for seed in run.seeds if seed.state == "completed")
     rows: list[tuple[str, int, int]] = [
         (
-            _display_path(run.name, "run", run.run_id, f"{run.status} {len(run.members)}/{total} joined"),
-            total,
-            min(len(run.members), total),
+            _display_path(
+                run.name,
+                "run",
+                run.run_id,
+                f"{run.status} {len(run.members)}/{max_workers} joined",
+            ),
+            total_run,
+            completed_run,
         ),
         (
             _display_path(
@@ -1220,6 +1246,19 @@ def _run_file_views(run: RunRecord) -> list[dict[str, JsonValue]]:
         (_display_path(run.name, "profile", run.profile_label, run.profile_id), 1, 1),
         (_display_path(run.name, "host", run.host_actor, run.visibility), 1, 1),
     ]
+    for check in run.startup_checks:
+        rows.append(
+            (
+                _display_path(
+                    run.name,
+                    "startup",
+                    check.label,
+                    f"{check.state} {check.current}/{check.total} {check.detail}",
+                ),
+                check.total,
+                check.current,
+            )
+        )
     for key, value in sorted(run.settings.items()):
         rows.append((_display_path(run.name, "setting", key, str(value)), 1, 1))
     for member in run.members:
