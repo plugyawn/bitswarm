@@ -1,0 +1,70 @@
+{
+  "enabled": true,
+  "title": "Local RandOpt Testnet",
+  "subtitle": "Qwen 0.5B demo lane · LightEval arithmetic profile",
+  "workload_type": "training",
+  "status": "running",
+  "phase": "evaluating",
+  "updated_at_ms": 1777437000000,
+  "metrics": [
+    {"label": "round", "value": "1", "detail": "active"},
+    {"label": "workers", "value": "2/2", "detail": "proposers online"},
+    {"label": "score", "value": "0.42", "detail": "running eval"}
+  ],
+  "progress": [
+    {
+      "id": "round-population",
+      "label": "Round population",
+      "state": "evaluating",
+      "current": 3,
+      "total": 5,
+      "unit": "seeds",
+      "detail": "proposal packets collected"
+    },
+    {
+      "id": "validation",
+      "label": "Validator replay",
+      "state": "waiting",
+      "current": 0,
+      "total": 1,
+      "unit": "candidates",
+      "detail": "starts after shortlist"
+    }
+  ],
+  "members": [
+    {
+      "id": "coordinator",
+      "label": "coordinator",
+      "role": "validator",
+      "state": "running",
+      "detail": "round-1"
+    },
+    {
+      "id": "worker-a",
+      "label": "worker-a",
+      "role": "proposer",
+      "state": "evaluating",
+      "detail": "job-0003",
+      "current": 24,
+      "total": 64
+    }
+  ],
+  "streams": [
+    {
+      "id": "rollout-a",
+      "label": "gsm8k_fast-00013",
+      "kind": "rollout",
+      "state": "decode",
+      "current": 150,
+      "total": 512,
+      "prompt": "Question: Terry eats 2 yogurts a day. Each yogurt costs $1.25. How much does Terry spend in 6 days?",
+      "output": "Terry eats 2 yogurts per day for 6 days, so he eats 12 yogurts. 12 * $1.25 = $15.",
+      "score": "pending",
+      "detail": "greedy decode"
+    }
+  ],
+  "events": [
+    {"ts_ms": 1777437000000, "level": "info", "message": "round started"},
+    {"ts_ms": 1777437001000, "level": "info", "message": "worker-a leased job-0003"}
+  ]
+}

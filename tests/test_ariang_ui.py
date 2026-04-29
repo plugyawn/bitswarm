@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -26,6 +27,81 @@ async def test_ariang_serves_vendored_ui() -> None:
     assert "bitswarm-adapter.js" in response.text
     assert "bitswarm-adapter.css" in response.text
     assert "aria-ng" in response.text
+
+
+async def test_ariang_exposes_optional_workload_telemetry(tmp_path: Path) -> None:
+    telemetry_path = tmp_path / "telemetry.json"
+    telemetry_path.write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "title": "Local training testnet",
+                "subtitle": "Qwen 0.5B local lane",
+                "workload_type": "training",
+                "status": "running",
+                "phase": "evaluating",
+                "updated_at_ms": 123,
+                "metrics": [{"label": "score", "value": "0.42", "detail": "live"}],
+                "progress": [
+                    {
+                        "id": "round",
+                        "label": "Round population",
+                        "state": "evaluating",
+                        "current": 3,
+                        "total": 5,
+                        "unit": "seeds",
+                        "detail": "worker packets",
+                    }
+                ],
+                "members": [
+                    {
+                        "id": "worker-a",
+                        "label": "worker-a",
+                        "role": "proposer",
+                        "state": "evaluating",
+                        "detail": "job-0003",
+                        "current": 8,
+                        "total": 64,
+                    }
+                ],
+                "streams": [
+                    {
+                        "id": "stream-a",
+                        "label": "gsm8k_fast-0001",
+                        "kind": "rollout",
+                        "state": "decode",
+                        "current": 48,
+                        "total": 512,
+                        "prompt": "Question: 2+2?",
+                        "output": "4",
+                        "score": "1.0",
+                        "detail": "greedy",
+                    }
+                ],
+                "events": [{"ts_ms": 123, "level": "info", "message": "round started"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = create_ariang_app(telemetry_json=telemetry_path)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ui") as client:
+        response = await client.get("/api/bitswarm/ui/telemetry")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["enabled"] is True
+    assert payload["workload_type"] == "training"
+    assert payload["progress"][0]["current"] == 3
+    assert payload["streams"][0]["output"] == "4"
+
+
+async def test_ariang_default_telemetry_is_disabled() -> None:
+    app = create_ariang_app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ui") as client:
+        response = await client.get("/api/bitswarm/ui/telemetry")
+    assert response.status_code == 200
+    assert response.json()["enabled"] is False
 
 
 async def test_ariang_jsonrpc_add_uri_download_tracks_completion(
@@ -151,3 +227,16 @@ def test_cli_webui_runs_vendored_ariang(monkeypatch: pytest.MonkeyPatch) -> None
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 8897
     assert captured["app"].state.bitswarm_ariang_bridge is not None
+
+
+def test_cli_webui_rejects_two_telemetry_sources() -> None:
+    with pytest.raises(SystemExit):
+        cli_module.main(
+            [
+                "webui",
+                "--telemetry-json",
+                "telemetry.json",
+                "--telemetry-url",
+                "http://127.0.0.1:9000/status",
+            ]
+        )

@@ -70,3 +70,19 @@ file:///absolute/path/manifest.json?peer=http%3A%2F%2F127.0.0.1%3A8899&out=/abso
 
 The bridge binds to loopback by default because it accepts local filesystem
 paths. Remote binding requires `--unsafe-allow-remote-bind`.
+
+The UI can also render application progress such as training rounds, workers,
+rollouts, validation, or other workload state through an optional sidecar
+presentation feed:
+
+```bash
+uv run bitswarm webui --telemetry-json /path/to/telemetry.json
+uv run bitswarm webui --telemetry-url http://127.0.0.1:9000/telemetry
+```
+
+That feed is consumed by the local `/api/bitswarm/ui/telemetry` endpoint and is
+not part of the peer/tracker protocol. Applications should write only
+presentation state there, not authority records or optimizer/training control
+messages.
+
+See `docs/examples/training-telemetry.json` for the concrete schema.

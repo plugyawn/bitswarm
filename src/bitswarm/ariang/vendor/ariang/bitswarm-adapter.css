@@ -20,3 +20,179 @@ body.bitswarm-bridge .content-header h1::after {
   font-size: 60%;
 }
 
+#bitswarm-telemetry-panel {
+  background: #0f1b26;
+  border: 1px solid #263d52;
+  border-radius: 4px;
+  color: #d7e1ea;
+  margin: 12px;
+  padding: 12px;
+}
+
+#bitswarm-telemetry-panel.is-disabled {
+  opacity: 0.72;
+}
+
+.bs-telemetry-head {
+  align-items: flex-start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.bs-eyebrow {
+  color: #79c0ff;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+#bitswarm-telemetry-panel h2 {
+  color: #f2f7fb;
+  font-size: 20px;
+  margin: 2px 0 4px;
+}
+
+#bitswarm-telemetry-panel h3 {
+  color: #d7e1ea;
+  font-size: 13px;
+  margin: 10px 0 6px;
+  text-transform: uppercase;
+}
+
+#bitswarm-telemetry-panel p {
+  margin: 0;
+}
+
+.bs-status {
+  min-width: 120px;
+  text-align: right;
+}
+
+.bs-status span {
+  color: #9fb3c8;
+  display: block;
+  font-size: 12px;
+}
+
+.bs-status strong {
+  color: #7ee787;
+  font-size: 16px;
+}
+
+.bs-metrics {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  margin-top: 10px;
+}
+
+.bs-metric,
+.bs-progress-row,
+.bs-list-row,
+.bs-event {
+  background: #132230;
+  border: 1px solid #23384c;
+  border-radius: 4px;
+  padding: 8px;
+}
+
+.bs-metric span,
+.bs-list-row span,
+.bs-progress-top span,
+.bs-event span,
+.bs-event strong {
+  color: #9fb3c8;
+  font-size: 12px;
+}
+
+.bs-metric strong {
+  color: #f2f7fb;
+  display: block;
+  font-size: 18px;
+}
+
+.bs-metric small,
+.bs-list-row small {
+  color: #7d93a8;
+  display: block;
+}
+
+.bs-progress-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.bs-progress-top {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.bs-progress-top strong,
+.bs-list-row strong {
+  color: #f2f7fb;
+}
+
+.bs-bar {
+  background: #0a121a;
+  height: 6px;
+  margin: 8px 0 4px;
+}
+
+.bs-bar div {
+  background: linear-gradient(90deg, #2f81f7, #7ee787);
+  height: 100%;
+}
+
+.bs-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 10px;
+}
+
+.bs-list {
+  display: grid;
+  gap: 6px;
+}
+
+.bs-stream pre {
+  background: #0a121a;
+  border: 1px solid #263d52;
+  color: #c9d7e3;
+  margin: 6px 0 0;
+  max-height: 96px;
+  overflow: auto;
+  padding: 6px;
+  white-space: pre-wrap;
+}
+
+.bs-event p {
+  color: #d7e1ea;
+}
+
+.bs-error {
+  border-color: #f85149;
+}
+
+.bs-warning {
+  border-color: #d29922;
+}
+
+@media (max-width: 900px) {
+  .bs-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .bs-telemetry-head,
+  .bs-progress-top {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .bs-status {
+    text-align: left;
+  }
+}

@@ -135,6 +135,16 @@ def _main(argv: list[str] | None = None) -> int:
     webui_parser.add_argument("--port", type=int, default=8897)
     webui_parser.add_argument("--download-dir", default=None)
     webui_parser.add_argument(
+        "--telemetry-json",
+        default=None,
+        help="Optional local JSON sidecar file for operator/training telemetry.",
+    )
+    webui_parser.add_argument(
+        "--telemetry-url",
+        default=None,
+        help="Optional HTTP(S) sidecar endpoint for operator/training telemetry.",
+    )
+    webui_parser.add_argument(
         "--unsafe-allow-remote-bind",
         action="store_true",
         help="Allow binding the path-capable local UI to a non-loopback interface.",
@@ -232,9 +242,13 @@ def _main(argv: list[str] | None = None) -> int:
             parser.error(
                 "webui binds to loopback by default; pass --unsafe-allow-remote-bind explicitly"
             )
+        if args.telemetry_json and args.telemetry_url:
+            parser.error("--telemetry-json and --telemetry-url are mutually exclusive")
         uvicorn.run(
             create_ariang_app(
-                default_output_dir=Path(args.download_dir).expanduser() if args.download_dir else None
+                default_output_dir=Path(args.download_dir).expanduser() if args.download_dir else None,
+                telemetry_json=Path(args.telemetry_json).expanduser() if args.telemetry_json else None,
+                telemetry_url=args.telemetry_url,
             ),
             host=args.host,
             port=args.port,

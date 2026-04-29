@@ -88,6 +88,18 @@ bitswarm:?manifest=/absolute/path/manifest.json&peer=http%3A%2F%2F127.0.0.1%3A88
 The UI bridge is local operator tooling. It does not change the public Bitswarm
 peer or tracker protocol.
 
+Applications can project training or other workload progress into the UI with a
+separate sidecar presentation feed:
+
+```bash
+uv run bitswarm webui --telemetry-json /path/to/telemetry.json
+```
+
+That feed is local UI state only; it is not carried by Bitswarm peers or
+trackers.
+
+A runnable sample lives at `docs/examples/training-telemetry.json`.
+
 ## Protocol Contract
 
 Every accepted byte must pass:
