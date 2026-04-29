@@ -1,0 +1,22 @@
+body.bitswarm-bridge .main-header .logo,
+body.bitswarm-bridge .main-header .navbar {
+  background-color: #253447;
+}
+
+body.bitswarm-bridge .main-sidebar .treeview,
+body.bitswarm-bridge .main-sidebar li[data-href-match^="/settings"],
+body.bitswarm-bridge .main-sidebar li[data-href-match="/status"],
+body.bitswarm-bridge .main-sidebar li[data-href-match="/debug"] {
+  display: none !important;
+}
+
+body.bitswarm-bridge .main-sidebar li.header:nth-of-type(2) {
+  display: none !important;
+}
+
+body.bitswarm-bridge .content-header h1::after {
+  content: "  Bitswarm";
+  color: #607d8b;
+  font-size: 60%;
+}
+

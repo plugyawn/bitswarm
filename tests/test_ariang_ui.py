@@ -22,7 +22,9 @@ async def test_ariang_serves_vendored_ui() -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://ui") as client:
         response = await client.get("/")
     assert response.status_code == 200
-    assert "AriaNg" in response.text
+    assert "<title>Bitswarm</title>" in response.text
+    assert "bitswarm-adapter.js" in response.text
+    assert "bitswarm-adapter.css" in response.text
     assert "aria-ng" in response.text
 
 

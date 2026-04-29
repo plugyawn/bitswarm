@@ -14,6 +14,9 @@ Local adaptation:
 - The built AriaNg local-storage prefix is patched from `AriaNg` to
   `BitswarmAriaNg` so this bridge does not inherit unrelated user settings from
   a normal AriaNg install.
+- Visible first-run chrome is patched to say Bitswarm, route first-run users to
+  the download list instead of stock AriaNg settings, and hide the irrelevant
+  Aria2 settings/status routes behind `bitswarm-adapter.js`/`.css`.
 - The public Bitswarm transfer protocol is not changed by this UI. The bridge
   emulates the subset of aria2 JSON-RPC that AriaNg needs and maps those calls
   onto verified Bitswarm manifest downloads.
