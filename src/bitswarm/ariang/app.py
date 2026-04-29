@@ -21,8 +21,12 @@ def create_ariang_app(
 ) -> FastAPI:
     """Create a local AriaNg UI backed by a Bitswarm JSON-RPC bridge."""
     static_root = Path(__file__).parent / "vendor" / "ariang"
-    state = AriaNgBridge(download_fn=download_fn, default_output_dir=default_output_dir)
     telemetry = TelemetryProvider(json_path=telemetry_json, url=telemetry_url)
+    state = AriaNgBridge(
+        download_fn=download_fn,
+        default_output_dir=default_output_dir,
+        telemetry_provider=telemetry,
+    )
     app = FastAPI(title="bitswarm-ariang", version="1.0.0a1")
     app.state.bitswarm_ariang_bridge = state
     app.state.bitswarm_telemetry_provider = telemetry

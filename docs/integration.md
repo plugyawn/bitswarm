@@ -66,6 +66,7 @@ Supported add-URI forms include:
 ```text
 bitswarm:?manifest=/absolute/path/manifest.json&peer=http%3A%2F%2F127.0.0.1%3A8899&out=/absolute/output/path
 file:///absolute/path/manifest.json?peer=http%3A%2F%2F127.0.0.1%3A8899&out=/absolute/output/path
+magnet:?xt=urn:bitswarm:<manifest-id>&xs=/absolute/path/manifest.json&x.pe=http%3A%2F%2F127.0.0.1%3A8899&x.out=/absolute/output/path
 ```
 
 The bridge binds to loopback by default because it accepts local filesystem
@@ -81,8 +82,9 @@ uv run bitswarm webui --telemetry-url http://127.0.0.1:9000/telemetry
 ```
 
 That feed is consumed by the local `/api/bitswarm/ui/telemetry` endpoint and is
-not part of the peer/tracker protocol. Applications should write only
-presentation state there, not authority records or optimizer/training control
-messages.
+not part of the peer/tracker protocol. The bridge projects feed entries into
+native aria2-style task rows, file rows, peers, and global stats so AriaNg keeps
+its normal download-manager UI. Applications should write only presentation
+state there, not authority records or optimizer/training control messages.
 
 See `docs/examples/training-telemetry.json` for the concrete schema.

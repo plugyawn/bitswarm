@@ -8,6 +8,8 @@ and ``bitswarm.tracker``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import re
 import secrets
 import time
 from collections.abc import Awaitable, Callable
@@ -22,6 +24,8 @@ from bitswarm.client.downloader import PeerInput, ProgressCallback, download_man
 from bitswarm.protocol.manifest import load_manifest
 from bitswarm.protocol.paths import resolve_target_without_symlink_ancestors
 from bitswarm.protocol.schemas import BitswarmManifest
+
+from .telemetry import TelemetryProgress, TelemetryProvider, WorkloadTelemetry
 
 JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 DownloadFn = Callable[
@@ -128,9 +132,11 @@ class AriaNgBridge:
         *,
         download_fn: DownloadFn | None = None,
         default_output_dir: Path | None = None,
+        telemetry_provider: TelemetryProvider | None = None,
     ) -> None:
         self._download_fn = download_fn or _default_download
         self._default_output_dir = default_output_dir or Path.cwd() / "bitswarm-downloads"
+        self._telemetry_provider = telemetry_provider
         self._transfers: dict[str, Transfer] = {}
         self._lock = asyncio.Lock()
         self._global_options: dict[str, JsonValue] = {
@@ -232,37 +238,55 @@ class AriaNgBridge:
         return gid
 
     async def _rpc_tellActive(self, params: list[Any]) -> JsonValue:
-        return await self._select_transfers(["active"], _fields_from_tail(params))
+        return await self._select_tasks(["active"], _fields_from_tail(params))
 
     async def _rpc_tellWaiting(self, params: list[Any]) -> JsonValue:
         offset = int(params[0]) if params and isinstance(params[0], int) else 0
         num = int(params[1]) if len(params) > 1 and isinstance(params[1], int) else 1000
         fields = params[2] if len(params) > 2 and isinstance(params[2], list) else None
-        rows = await self._select_transfers(["waiting", "paused"], fields)
+        rows = await self._select_tasks(["waiting", "paused"], fields)
         return rows[offset : offset + num]
 
     async def _rpc_tellStopped(self, params: list[Any]) -> JsonValue:
         offset = int(params[0]) if params and isinstance(params[0], int) else -1
         num = int(params[1]) if len(params) > 1 and isinstance(params[1], int) else 1000
         fields = params[2] if len(params) > 2 and isinstance(params[2], list) else None
-        rows = await self._select_transfers(["complete", "error", "removed"], fields)
+        rows = await self._select_tasks(["complete", "error", "removed"], fields)
         if offset < 0:
             return rows[-num:] if num >= 0 else rows
         return rows[offset : offset + num]
 
     async def _rpc_tellStatus(self, params: list[Any]) -> JsonValue:
-        transfer = await self._transfer_from_params(params)
-        return self._task_view(transfer)
+        gid = _gid_from_params(params)
+        fields = params[1] if len(params) > 1 and isinstance(params[1], list) else None
+        transfer = await self._transfer_by_gid(gid)
+        if transfer is not None:
+            return self._task_view(transfer, fields=fields)
+        task = await self._telemetry_task_by_gid(gid, fields=fields)
+        if task is not None:
+            return task
+        raise RpcFailure(1, f"gid not found: {gid}")
 
     async def _rpc_getUris(self, params: list[Any]) -> JsonValue:
+        gid = _gid_from_params(params)
+        if await self._telemetry_gid_exists(gid):
+            return [{"uri": f"bitswarm-telemetry:{gid}", "status": "used"}]
         transfer = await self._transfer_from_params(params)
         return [{"uri": transfer.uri, "status": "used"}]
 
     async def _rpc_getFiles(self, params: list[Any]) -> JsonValue:
+        gid = _gid_from_params(params)
+        telemetry_files = await self._telemetry_files_by_gid(gid)
+        if telemetry_files is not None:
+            return telemetry_files
         transfer = await self._transfer_from_params(params)
         return self._file_views(transfer)
 
     async def _rpc_getPeers(self, params: list[Any]) -> JsonValue:
+        gid = _gid_from_params(params)
+        telemetry_peers = await self._telemetry_peers_by_gid(gid)
+        if telemetry_peers is not None:
+            return telemetry_peers
         transfer = await self._transfer_from_params(params)
         bitfield = _bitfield(transfer.completed_pieces, transfer.num_pieces)
         return [
@@ -281,6 +305,9 @@ class AriaNgBridge:
         ]
 
     async def _rpc_getServers(self, params: list[Any]) -> JsonValue:
+        gid = _gid_from_params(params)
+        if await self._telemetry_gid_exists(gid):
+            return [{"index": "1", "servers": [{"uri": f"bitswarm-telemetry:{gid}", "downloadSpeed": "0"}]}]
         transfer = await self._transfer_from_params(params)
         return [
             {
@@ -297,10 +324,16 @@ class AriaNgBridge:
         ]
 
     async def _rpc_getOption(self, params: list[Any]) -> JsonValue:
+        gid = _gid_from_params(params)
+        if await self._telemetry_gid_exists(gid):
+            return {}
         transfer = await self._transfer_from_params(params)
         return dict(transfer.options)
 
     async def _rpc_changeOption(self, params: list[Any]) -> JsonValue:
+        gid = _gid_from_params(params)
+        if await self._telemetry_gid_exists(gid):
+            return "OK"
         transfer = await self._transfer_from_params(params)
         options = params[1] if len(params) > 1 and isinstance(params[1], dict) else {}
         transfer.options.update({str(key): _coerce_json_value(value) for key, value in options.items()})
@@ -320,13 +353,22 @@ class AriaNgBridge:
         active = [transfer for transfer in transfers if transfer.status == "active"]
         waiting = [transfer for transfer in transfers if transfer.status in {"waiting", "paused"}]
         stopped = [transfer for transfer in transfers if transfer.status in {"complete", "error", "removed"}]
+        telemetry_tasks = await self._telemetry_task_views(fields=None)
+        telemetry_active = [task for task in telemetry_tasks if task.get("status") == "active"]
+        telemetry_waiting = [task for task in telemetry_tasks if task.get("status") in {"waiting", "paused"}]
+        telemetry_stopped = [
+            task for task in telemetry_tasks if task.get("status") in {"complete", "error", "removed"}
+        ]
         return {
-            "downloadSpeed": str(sum(transfer.download_speed for transfer in active)),
+            "downloadSpeed": str(
+                sum(transfer.download_speed for transfer in active)
+                + sum(int(str(task.get("downloadSpeed") or "0")) for task in telemetry_active)
+            ),
             "uploadSpeed": "0",
-            "numActive": str(len(active)),
-            "numWaiting": str(len(waiting)),
-            "numStopped": str(len(stopped)),
-            "numStoppedTotal": str(len(stopped)),
+            "numActive": str(len(active) + len(telemetry_active)),
+            "numWaiting": str(len(waiting) + len(telemetry_waiting)),
+            "numStopped": str(len(stopped) + len(telemetry_stopped)),
+            "numStoppedTotal": str(len(stopped) + len(telemetry_stopped)),
         }
 
     async def _rpc_getVersion(self, params: list[Any]) -> JsonValue:
@@ -374,6 +416,8 @@ class AriaNgBridge:
 
     async def _rpc_removeDownloadResult(self, params: list[Any]) -> JsonValue:
         gid = _gid_from_params(params)
+        if await self._telemetry_gid_exists(gid):
+            return "OK"
         async with self._lock:
             self._transfers.pop(gid, None)
         return "OK"
@@ -386,27 +430,38 @@ class AriaNgBridge:
         return "OK"
 
     async def _rpc_changePosition(self, params: list[Any]) -> JsonValue:
+        gid = _gid_from_params(params)
+        if await self._telemetry_gid_exists(gid):
+            return gid
         transfer = await self._transfer_from_params(params)
         return transfer.gid
 
-    async def _select_transfers(
+    async def _select_tasks(
         self,
         statuses: list[str],
         fields: list[Any] | None,
     ) -> list[dict[str, JsonValue]]:
         async with self._lock:
             selected = [transfer for transfer in self._transfers.values() if transfer.status in statuses]
-        return [self._task_view(transfer, fields=fields) for transfer in selected]
+        rows = [self._task_view(transfer, fields=fields) for transfer in selected]
+        rows.extend(await self._telemetry_task_views(statuses=statuses, fields=fields))
+        return rows
 
     async def _transfer_from_params(self, params: list[Any]) -> Transfer:
         gid = _gid_from_params(params)
-        async with self._lock:
-            transfer = self._transfers.get(gid)
+        transfer = await self._transfer_by_gid(gid)
         if transfer is None:
             raise RpcFailure(1, f"gid not found: {gid}")
         return transfer
 
+    async def _transfer_by_gid(self, gid: str) -> Transfer | None:
+        async with self._lock:
+            return self._transfers.get(gid)
+
     async def _pause_one(self, params: list[Any]) -> JsonValue:
+        gid = _gid_from_params(params)
+        if await self._telemetry_gid_exists(gid):
+            return gid
         transfer = await self._transfer_from_params(params)
         if transfer.task is not None and not transfer.task.done():
             transfer.task.cancel()
@@ -428,6 +483,9 @@ class AriaNgBridge:
         return "OK"
 
     async def _remove_one(self, params: list[Any]) -> JsonValue:
+        gid = _gid_from_params(params)
+        if await self._telemetry_gid_exists(gid):
+            return gid
         transfer = await self._transfer_from_params(params)
         if transfer.task is not None and not transfer.task.done():
             transfer.task.cancel()
@@ -532,6 +590,151 @@ class AriaNgBridge:
             )
         return views
 
+    async def _telemetry_task_views(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        fields: list[Any] | None = None,
+    ) -> list[dict[str, JsonValue]]:
+        snapshot = await self._telemetry_snapshot()
+        if snapshot is None or not snapshot.enabled:
+            return []
+        views = [
+            self._telemetry_task_view(snapshot, progress, fields=fields)
+            for progress in snapshot.progress
+        ]
+        if statuses is not None:
+            allowed = set(statuses)
+            views = [view for view in views if str(view.get("status")) in allowed]
+        return views
+
+    async def _telemetry_task_by_gid(
+        self,
+        gid: str,
+        *,
+        fields: list[Any] | None = None,
+    ) -> dict[str, JsonValue] | None:
+        for task in await self._telemetry_task_views(fields=fields):
+            if task.get("gid") == gid:
+                return task
+        return None
+
+    async def _telemetry_gid_exists(self, gid: str) -> bool:
+        return await self._telemetry_task_by_gid(gid) is not None
+
+    async def _telemetry_files_by_gid(self, gid: str) -> list[dict[str, JsonValue]] | None:
+        snapshot = await self._telemetry_snapshot()
+        if snapshot is None or not snapshot.enabled:
+            return None
+        for progress in snapshot.progress:
+            if _telemetry_gid(progress.id) == gid:
+                return _telemetry_file_views(snapshot, progress)
+        return None
+
+    async def _telemetry_peers_by_gid(self, gid: str) -> list[dict[str, JsonValue]] | None:
+        snapshot = await self._telemetry_snapshot()
+        if snapshot is None or not snapshot.enabled:
+            return None
+        progress = next((row for row in snapshot.progress if _telemetry_gid(row.id) == gid), None)
+        if progress is None:
+            return None
+        completed, total = _scaled_progress(progress.current, progress.total)
+        bitfield = _bitfield(_scaled_pieces(completed, total), max(1, min(64, total)))
+        return [
+            {
+                "peerId": f"bitswarm-workload-{index}",
+                "ip": member.label,
+                "port": "0",
+                "client": f"{member.role or 'worker'}:{member.state}",
+                "bitfield": bitfield,
+                "amChoking": "false",
+                "peerChoking": "false",
+                "downloadSpeed": "0",
+                "uploadSpeed": "0",
+                "seeder": "true" if member.state.lower() in {"complete", "completed", "done"} else "false",
+            }
+            for index, member in enumerate(snapshot.members, start=1)
+        ]
+
+    async def _telemetry_snapshot(self) -> WorkloadTelemetry | None:
+        if self._telemetry_provider is None:
+            return None
+        try:
+            return await self._telemetry_provider.snapshot()
+        except Exception as exc:
+            return WorkloadTelemetry(
+                enabled=True,
+                title="Bitswarm telemetry",
+                subtitle="Telemetry source returned an error.",
+                workload_type="telemetry",
+                status="error",
+                phase="error",
+                progress=[
+                    TelemetryProgress(
+                        id="telemetry-error",
+                        label="Telemetry source error",
+                        state="error",
+                        current=0,
+                        total=1,
+                        unit="errors",
+                        detail=str(exc),
+                    )
+                ],
+            )
+
+    def _telemetry_task_view(
+        self,
+        snapshot: WorkloadTelemetry,
+        progress: TelemetryProgress,
+        *,
+        fields: list[Any] | None = None,
+    ) -> dict[str, JsonValue]:
+        completed, total = _scaled_progress(progress.current, progress.total)
+        num_pieces = max(1, min(64, total))
+        completed_pieces = _scaled_pieces(completed, total)
+        gid = _telemetry_gid(progress.id)
+        status = _telemetry_status(progress.state)
+        speed = _rate_to_int(progress.rate)
+        mode = "multi" if snapshot.members or snapshot.streams or snapshot.events else "single"
+        view: dict[str, JsonValue] = {
+            "gid": gid,
+            "status": status,
+            "totalLength": str(total),
+            "completedLength": str(completed),
+            "uploadLength": "0",
+            "downloadSpeed": str(speed if status == "active" else 0),
+            "uploadSpeed": "0",
+            "connections": str(len(snapshot.members)),
+            "numSeeders": "0",
+            "seeder": "true" if status == "complete" else "false",
+            "dir": f"bitswarm://{snapshot.workload_type or 'workload'}",
+            "files": _telemetry_file_views(snapshot, progress),
+            "bitfield": _bitfield(completed_pieces, num_pieces),
+            "numPieces": str(num_pieces),
+            "pieceLength": str(max(1, total // num_pieces)),
+            "errorCode": "1" if status == "error" else "0",
+            "errorMessage": progress.detail if status == "error" else "",
+            "verifiedLength": str(completed),
+            "verifyIntegrityPending": "false",
+            "infoHash": gid * 2 + gid[:8],
+            "bittorrent": {
+                "announceList": [],
+                "creationDate": "0",
+                "mode": mode,
+                "info": {"name": f"{snapshot.title} - {progress.label}"},
+            },
+            "comment": " | ".join(
+                part
+                for part in [
+                    snapshot.subtitle,
+                    f"{progress.state} {progress.current}/{progress.total} {progress.unit}",
+                    progress.detail,
+                ]
+                if part
+            ),
+        }
+        return _filter_view(view, fields)
+
 
 class RpcFailure(Exception):
     def __init__(self, code: int, message: str) -> None:
@@ -557,6 +760,27 @@ async def _default_download(
 async def _parse_bitswarm_uri(uri: str, *, options: dict[str, Any]) -> ParsedBitswarmUri:
     parsed = urlparse(uri)
     query = parse_qs(parsed.query, keep_blank_values=False)
+    if parsed.scheme == "magnet":
+        xt_values = [unquote(value) for value in query.get("xt", [])]
+        if xt_values and not any(value.startswith("urn:bitswarm:") for value in xt_values):
+            raise RpcFailure(-32602, "magnet URI must contain xt=urn:bitswarm:<manifest-id>")
+        manifest_values = query.get("xs", []) or query.get("manifest", [])
+        if not manifest_values:
+            raise RpcFailure(-32602, "Bitswarm magnet URI requires xs=<manifest source>")
+        manifest_ref = unquote(manifest_values[0])
+        peer_urls = [
+            unquote(value)
+            for value in [*query.get("x.pe", []), *query.get("peer", [])]
+        ]
+        output_values = query.get("x.out", []) or query.get("out", []) or query.get("output", [])
+        output_path = Path(unquote(output_values[0])).expanduser() if output_values else None
+        return ParsedBitswarmUri(
+            manifest_ref=manifest_ref,
+            peer_urls=peer_urls,
+            output_path=output_path,
+            tracker_url=_first_query_value(query, "tr") or _first_query_value(query, "tracker"),
+            tracker_token=_first_query_value(query, "x.token") or _first_query_value(query, "token"),
+        )
     if parsed.scheme in {"bitswarm", "bitswarm+file"}:
         manifest_values = query.get("manifest")
         if not manifest_values:
@@ -661,6 +885,12 @@ def _coerce_json_value(value: Any) -> JsonValue:
     return str(value)
 
 
+def _filter_view(view: dict[str, JsonValue], fields: list[Any] | None) -> dict[str, JsonValue]:
+    if not fields:
+        return view
+    return {str(field): view[str(field)] for field in fields if str(field) in view}
+
+
 def _bitfield(completed_pieces: int, total_pieces: int) -> str:
     if total_pieces <= 0:
         return ""
@@ -668,3 +898,147 @@ def _bitfield(completed_pieces: int, total_pieces: int) -> str:
     while len(bits) % 4:
         bits.append("0")
     return "".join(f"{int(''.join(bits[index:index + 4]), 2):x}" for index in range(0, len(bits), 4))
+
+
+def _telemetry_gid(progress_id: str) -> str:
+    return hashlib.blake2s(f"telemetry:{progress_id}".encode(), digest_size=8).hexdigest()
+
+
+def _telemetry_status(state: str) -> str:
+    normalized = state.strip().lower().replace("_", "-")
+    if normalized in {"complete", "completed", "done", "accepted", "success", "succeeded"}:
+        return "complete"
+    if normalized in {"waiting", "queued", "pending", "idle"}:
+        return "waiting"
+    if normalized in {"paused", "suspended"}:
+        return "paused"
+    if normalized in {"error", "failed", "failure", "rejected"}:
+        return "error"
+    if normalized in {"removed", "cancelled", "canceled"}:
+        return "removed"
+    return "active"
+
+
+def _scaled_progress(current: int | float, total: int | float) -> tuple[int, int]:
+    current_f = max(float(current), 0.0)
+    total_f = max(float(total), 1e-9)
+    scale = 1000 if not current_f.is_integer() or not total_f.is_integer() else 1
+    scaled_total = max(1, int(round(total_f * scale)))
+    scaled_current = max(0, min(scaled_total, int(round(current_f * scale))))
+    return scaled_current, scaled_total
+
+
+def _scaled_pieces(completed: int, total: int) -> int:
+    total_pieces = max(1, min(64, total))
+    if total <= 0:
+        return 0
+    return max(0, min(total_pieces, int(round(total_pieces * (completed / total)))))
+
+
+def _rate_to_int(value: str) -> int:
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", value)
+    if match is None:
+        return 0
+    return max(0, int(float(match.group(0))))
+
+
+def _telemetry_file_views(
+    snapshot: WorkloadTelemetry,
+    progress: TelemetryProgress,
+) -> list[dict[str, JsonValue]]:
+    completed, total = _scaled_progress(progress.current, progress.total)
+    rows: list[tuple[str, int, int]] = [
+        (
+            _display_path(snapshot.title, "progress", progress.label, progress.detail or progress.state),
+            total,
+            completed,
+        )
+    ]
+    for metric in snapshot.metrics:
+        rows.append(
+            (
+                _display_path(
+                    snapshot.title,
+                    "metric",
+                    metric.label,
+                    f"{metric.value} {metric.detail}".strip(),
+                ),
+                1,
+                1,
+            )
+        )
+    for member in snapshot.members:
+        member_completed, member_total = _optional_scaled_pair(member.current, member.total)
+        rows.append(
+            (
+                _display_path(
+                    snapshot.title,
+                    "member",
+                    member.label,
+                    " ".join(part for part in [member.role, member.state, member.detail] if part),
+                ),
+                member_total,
+                member_completed,
+            )
+        )
+    for stream in snapshot.streams:
+        stream_completed, stream_total = _optional_scaled_pair(stream.current, stream.total)
+        stream_detail = " ".join(
+            part for part in [stream.kind, stream.state, stream.score, stream.detail] if part
+        )
+        rows.append(
+            (
+                _display_path(snapshot.title, "stream", stream.label, stream_detail),
+                stream_total,
+                stream_completed,
+            )
+        )
+        if stream.prompt:
+            rows.append(
+                (
+                    _display_path(snapshot.title, "stream", f"{stream.label} prompt", stream.prompt),
+                    1,
+                    1,
+                )
+            )
+        if stream.output:
+            rows.append(
+                (
+                    _display_path(snapshot.title, "stream", f"{stream.label} output", stream.output),
+                    1,
+                    1,
+                )
+            )
+    for event in snapshot.events[-10:]:
+        rows.append((_display_path(snapshot.title, "event", event.level, event.message), 1, 1))
+    return [
+        {
+            "index": str(index),
+            "path": path,
+            "length": str(max(length, 1)),
+            "completedLength": str(max(0, min(completed_length, max(length, 1)))),
+            "selected": "true",
+            "uris": [{"uri": f"bitswarm-telemetry:{progress.id}", "status": "used"}],
+        }
+        for index, (path, length, completed_length) in enumerate(rows, start=1)
+    ]
+
+
+def _optional_scaled_pair(
+    current: int | float | None,
+    total: int | float | None,
+) -> tuple[int, int]:
+    if current is None or total is None:
+        return 1, 1
+    return _scaled_progress(current, total)
+
+
+def _display_path(title: str, section: str, label: str, detail: str = "") -> str:
+    parts = [_safe_path_part(title), _safe_path_part(section), _safe_path_part(label)]
+    if detail:
+        parts.append(_safe_path_part(detail))
+    return "/".join(part for part in parts if part)
+
+
+def _safe_path_part(value: str) -> str:
+    return " ".join(value.replace("/", " / ").split())

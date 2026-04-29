@@ -85,6 +85,13 @@ Bitswarm transfer from AriaNg's New page, use a URI like:
 bitswarm:?manifest=/absolute/path/manifest.json&peer=http%3A%2F%2F127.0.0.1%3A8899&out=/absolute/output/path
 ```
 
+The bridge also accepts a magnet-shaped Bitswarm URI, so existing
+download-manager add flows can stay familiar:
+
+```text
+magnet:?xt=urn:bitswarm:<manifest-id>&xs=/absolute/path/manifest.json&x.pe=http%3A%2F%2F127.0.0.1%3A8899&x.out=/absolute/output/path
+```
+
 The UI bridge is local operator tooling. It does not change the public Bitswarm
 peer or tracker protocol.
 
@@ -96,7 +103,9 @@ uv run bitswarm webui --telemetry-json /path/to/telemetry.json
 ```
 
 That feed is local UI state only; it is not carried by Bitswarm peers or
-trackers.
+trackers. The AriaNg bridge presents sidecar workload progress as ordinary
+aria2 task rows, file rows, peer rows, and global stats. There is no separate
+custom dashboard layered on top of AriaNg.
 
 A runnable sample lives at `docs/examples/training-telemetry.json`.
 
