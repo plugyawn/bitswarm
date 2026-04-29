@@ -71,6 +71,23 @@ uv run bitswarm download manifest.json --tracker http://127.0.0.1:8898 --token "
   --out ./downloaded-tree
 ```
 
+Run the vendored AriaNg Web UI with a local Bitswarm bridge:
+
+```bash
+uv run bitswarm webui --host 127.0.0.1 --port 8897
+```
+
+Open `http://127.0.0.1:8897`. The UI is the upstream MIT-licensed AriaNg
+static app adapted through an aria2-compatible JSON-RPC bridge. To add a
+Bitswarm transfer from AriaNg's New page, use a URI like:
+
+```text
+bitswarm:?manifest=/absolute/path/manifest.json&peer=http%3A%2F%2F127.0.0.1%3A8899&out=/absolute/output/path
+```
+
+The UI bridge is local operator tooling. It does not change the public Bitswarm
+peer or tracker protocol.
+
 ## Protocol Contract
 
 Every accepted byte must pass:

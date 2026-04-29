@@ -11,6 +11,7 @@ import httpx
 import uvicorn
 from pydantic import ValidationError
 
+from bitswarm.ariang.app import create_ariang_app, is_safe_local_bind
 from bitswarm.client.downloader import PeerSource, download_manifest, tracker_peer_source
 from bitswarm.client.seeder import create_seeder_app
 from bitswarm.protocol.errors import BitswarmError
@@ -129,6 +130,16 @@ def _main(argv: list[str] | None = None) -> int:
     peers_parser.add_argument("--tracker", required=True)
     peers_parser.add_argument("--token", required=True)
 
+    webui_parser = sub.add_parser("webui", help="Run the vendored AriaNg UI with a Bitswarm bridge.")
+    webui_parser.add_argument("--host", default="127.0.0.1")
+    webui_parser.add_argument("--port", type=int, default=8897)
+    webui_parser.add_argument("--download-dir", default=None)
+    webui_parser.add_argument(
+        "--unsafe-allow-remote-bind",
+        action="store_true",
+        help="Allow binding the path-capable local UI to a non-loopback interface.",
+    )
+
     args = parser.parse_args(argv)
     if args.command == "manifest":
         manifest = create_manifest(Path(args.path), piece_size=args.piece_size, name=args.name)
@@ -215,6 +226,19 @@ def _main(argv: list[str] | None = None) -> int:
             expected_piece_ids=expected_piece_ids,
         ):
             print(peer_source.base_url if isinstance(peer_source, PeerSource) else peer_source)
+        return 0
+    if args.command == "webui":
+        if not is_safe_local_bind(args.host) and not args.unsafe_allow_remote_bind:
+            parser.error(
+                "webui binds to loopback by default; pass --unsafe-allow-remote-bind explicitly"
+            )
+        uvicorn.run(
+            create_ariang_app(
+                default_output_dir=Path(args.download_dir).expanduser() if args.download_dir else None
+            ),
+            host=args.host,
+            port=args.port,
+        )
         return 0
     parser.error(f"unknown command {args.command}")
     return 2

@@ -1,0 +1,670 @@
+"""aria2 JSON-RPC compatibility bridge backed by Bitswarm downloads.
+
+This module intentionally implements a local operator API, not public Bitswarm
+wire protocol. The public peer/tracker protocol remains in ``bitswarm.protocol``
+and ``bitswarm.tracker``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import secrets
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, unquote, urlparse
+
+import httpx
+
+from bitswarm.client.downloader import PeerInput, ProgressCallback, download_manifest
+from bitswarm.protocol.manifest import load_manifest
+from bitswarm.protocol.paths import resolve_target_without_symlink_ancestors
+from bitswarm.protocol.schemas import BitswarmManifest
+
+JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
+DownloadFn = Callable[
+    [BitswarmManifest, list[PeerInput], Path, ProgressCallback | None],
+    Awaitable[Path],
+]
+
+_SUPPORTED_METHODS = {
+    "aria2.addUri",
+    "aria2.changeGlobalOption",
+    "aria2.changeOption",
+    "aria2.changePosition",
+    "aria2.forcePause",
+    "aria2.forcePauseAll",
+    "aria2.forceRemove",
+    "aria2.getFiles",
+    "aria2.getGlobalOption",
+    "aria2.getGlobalStat",
+    "aria2.getOption",
+    "aria2.getPeers",
+    "aria2.getServers",
+    "aria2.getSessionInfo",
+    "aria2.getUris",
+    "aria2.getVersion",
+    "aria2.pause",
+    "aria2.pauseAll",
+    "aria2.purgeDownloadResult",
+    "aria2.remove",
+    "aria2.removeDownloadResult",
+    "aria2.tellActive",
+    "aria2.tellStatus",
+    "aria2.tellStopped",
+    "aria2.tellWaiting",
+    "aria2.unpause",
+    "aria2.unpauseAll",
+    "system.listMethods",
+    "system.listNotifications",
+    "system.multicall",
+}
+
+
+@dataclass(slots=True)
+class ParsedBitswarmUri:
+    manifest_ref: str
+    peer_urls: list[str]
+    output_path: Path | None
+    tracker_url: str | None = None
+    tracker_token: str | None = None
+
+
+@dataclass(slots=True)
+class Transfer:
+    gid: str
+    uri: str
+    manifest: BitswarmManifest
+    peer_urls: list[str]
+    output_path: Path
+    options: dict[str, JsonValue]
+    status: str = "waiting"
+    completed_pieces: int = 0
+    completed_length: int = 0
+    download_speed: int = 0
+    error_code: str = "0"
+    error_message: str = ""
+    created_at: float = field(default_factory=time.monotonic)
+    updated_at: float = field(default_factory=time.monotonic)
+    stopped_at: float = 0.0
+    task: asyncio.Task[None] | None = None
+    _last_sample_time: float = field(default_factory=time.monotonic)
+    _last_sample_bytes: int = 0
+
+    @property
+    def total_length(self) -> int:
+        return self.manifest.total_size
+
+    @property
+    def piece_length(self) -> int:
+        return self.manifest.piece_size
+
+    @property
+    def num_pieces(self) -> int:
+        return len(self.manifest.pieces)
+
+    def refresh_completed_length(self) -> None:
+        self.completed_length = sum(piece.size for piece in self.manifest.pieces[: self.completed_pieces])
+
+    def update_progress(self, done: int) -> None:
+        self.completed_pieces = max(0, min(done, self.num_pieces))
+        self.refresh_completed_length()
+        now = time.monotonic()
+        elapsed = max(now - self._last_sample_time, 1e-6)
+        delta = max(self.completed_length - self._last_sample_bytes, 0)
+        self.download_speed = int(delta / elapsed)
+        self._last_sample_time = now
+        self._last_sample_bytes = self.completed_length
+        self.updated_at = now
+
+
+class AriaNgBridge:
+    """Local aria2-compatible facade for AriaNg."""
+
+    def __init__(
+        self,
+        *,
+        download_fn: DownloadFn | None = None,
+        default_output_dir: Path | None = None,
+    ) -> None:
+        self._download_fn = download_fn or _default_download
+        self._default_output_dir = default_output_dir or Path.cwd() / "bitswarm-downloads"
+        self._transfers: dict[str, Transfer] = {}
+        self._lock = asyncio.Lock()
+        self._global_options: dict[str, JsonValue] = {
+            "dir": str(self._default_output_dir),
+            "max-concurrent-downloads": "5",
+            "continue": "true",
+        }
+        self._session_id = f"bitswarm-{secrets.token_hex(8)}"
+
+    async def handle_jsonrpc(self, payload: dict[str, Any]) -> dict[str, JsonValue]:
+        request_id = _coerce_json_value(payload.get("id"))
+        try:
+            if payload.get("jsonrpc") != "2.0":
+                raise RpcFailure(-32600, "invalid JSON-RPC version")
+            method = payload.get("method")
+            if not isinstance(method, str):
+                raise RpcFailure(-32600, "method must be a string")
+            params = payload.get("params", [])
+            if params is None:
+                params = []
+            if not isinstance(params, list):
+                raise RpcFailure(-32602, "params must be an array")
+            result = await self._dispatch(method, _strip_token(params))
+            return {"jsonrpc": "2.0", "id": request_id, "result": result}
+        except RpcFailure as exc:
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": exc.code, "message": exc.message},
+            }
+        except Exception as exc:
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32000, "message": str(exc)},
+            }
+
+    async def _dispatch(self, method: str, params: list[Any]) -> JsonValue:
+        if method not in _SUPPORTED_METHODS:
+            raise RpcFailure(-32601, f"unsupported method: {method}")
+        if method == "system.listMethods":
+            return sorted(_SUPPORTED_METHODS)
+        if method == "system.listNotifications":
+            return []
+        if method == "system.multicall":
+            return await self._multicall(params)
+        method_name = method.removeprefix("aria2.")
+        handler = getattr(self, f"_rpc_{method_name}", None)
+        if handler is None:
+            raise RpcFailure(-32601, f"unsupported method: {method}")
+        return await handler(params)
+
+    async def _multicall(self, params: list[Any]) -> JsonValue:
+        if len(params) != 1 or not isinstance(params[0], list):
+            raise RpcFailure(-32602, "system.multicall expects a method array")
+        results: list[JsonValue] = []
+        for call in params[0]:
+            if not isinstance(call, dict):
+                raise RpcFailure(-32602, "multicall entries must be objects")
+            method = call.get("methodName")
+            call_params = call.get("params", [])
+            if not isinstance(method, str) or not isinstance(call_params, list):
+                raise RpcFailure(-32602, "invalid multicall entry")
+            try:
+                results.append([await self._dispatch(method, _strip_token(call_params))])
+            except RpcFailure as exc:
+                results.append({"faultCode": exc.code, "faultString": exc.message})
+        return results
+
+    async def _rpc_addUri(self, params: list[Any]) -> JsonValue:
+        if not params or not isinstance(params[0], list) or not params[0]:
+            raise RpcFailure(-32602, "aria2.addUri expects at least one URI")
+        uri = params[0][0]
+        if not isinstance(uri, str):
+            raise RpcFailure(-32602, "Bitswarm manifest URI must be a string")
+        options = params[1] if len(params) > 1 and isinstance(params[1], dict) else {}
+        parsed = await _parse_bitswarm_uri(uri, options=options)
+        manifest = await _load_manifest_ref(parsed.manifest_ref)
+        gid = secrets.token_hex(8)
+        output_path = parsed.output_path or _output_path_from_options(
+            options,
+            default_dir=self._default_output_dir,
+            manifest=manifest,
+        )
+        transfer = Transfer(
+            gid=gid,
+            uri=uri,
+            manifest=manifest,
+            peer_urls=parsed.peer_urls,
+            output_path=resolve_target_without_symlink_ancestors(output_path),
+            options={str(key): _coerce_json_value(value) for key, value in options.items()},
+        )
+        async with self._lock:
+            self._transfers[gid] = transfer
+        if str(options.get("pause", "")).lower() == "true":
+            transfer.status = "paused"
+        else:
+            self._start_transfer(transfer)
+        return gid
+
+    async def _rpc_tellActive(self, params: list[Any]) -> JsonValue:
+        return await self._select_transfers(["active"], _fields_from_tail(params))
+
+    async def _rpc_tellWaiting(self, params: list[Any]) -> JsonValue:
+        offset = int(params[0]) if params and isinstance(params[0], int) else 0
+        num = int(params[1]) if len(params) > 1 and isinstance(params[1], int) else 1000
+        fields = params[2] if len(params) > 2 and isinstance(params[2], list) else None
+        rows = await self._select_transfers(["waiting", "paused"], fields)
+        return rows[offset : offset + num]
+
+    async def _rpc_tellStopped(self, params: list[Any]) -> JsonValue:
+        offset = int(params[0]) if params and isinstance(params[0], int) else -1
+        num = int(params[1]) if len(params) > 1 and isinstance(params[1], int) else 1000
+        fields = params[2] if len(params) > 2 and isinstance(params[2], list) else None
+        rows = await self._select_transfers(["complete", "error", "removed"], fields)
+        if offset < 0:
+            return rows[-num:] if num >= 0 else rows
+        return rows[offset : offset + num]
+
+    async def _rpc_tellStatus(self, params: list[Any]) -> JsonValue:
+        transfer = await self._transfer_from_params(params)
+        return self._task_view(transfer)
+
+    async def _rpc_getUris(self, params: list[Any]) -> JsonValue:
+        transfer = await self._transfer_from_params(params)
+        return [{"uri": transfer.uri, "status": "used"}]
+
+    async def _rpc_getFiles(self, params: list[Any]) -> JsonValue:
+        transfer = await self._transfer_from_params(params)
+        return self._file_views(transfer)
+
+    async def _rpc_getPeers(self, params: list[Any]) -> JsonValue:
+        transfer = await self._transfer_from_params(params)
+        bitfield = _bitfield(transfer.completed_pieces, transfer.num_pieces)
+        return [
+            {
+                "peerId": f"bitswarm-peer-{index}",
+                "ip": urlparse(peer_url).hostname or peer_url,
+                "port": str(urlparse(peer_url).port or ""),
+                "bitfield": bitfield,
+                "amChoking": "false",
+                "peerChoking": "false",
+                "downloadSpeed": str(transfer.download_speed),
+                "uploadSpeed": "0",
+                "seeder": "true" if transfer.status == "complete" else "false",
+            }
+            for index, peer_url in enumerate(transfer.peer_urls, start=1)
+        ]
+
+    async def _rpc_getServers(self, params: list[Any]) -> JsonValue:
+        transfer = await self._transfer_from_params(params)
+        return [
+            {
+                "index": "1",
+                "servers": [
+                    {
+                        "uri": peer_url,
+                        "currentUri": peer_url,
+                        "downloadSpeed": str(transfer.download_speed),
+                    }
+                    for peer_url in transfer.peer_urls
+                ],
+            }
+        ]
+
+    async def _rpc_getOption(self, params: list[Any]) -> JsonValue:
+        transfer = await self._transfer_from_params(params)
+        return dict(transfer.options)
+
+    async def _rpc_changeOption(self, params: list[Any]) -> JsonValue:
+        transfer = await self._transfer_from_params(params)
+        options = params[1] if len(params) > 1 and isinstance(params[1], dict) else {}
+        transfer.options.update({str(key): _coerce_json_value(value) for key, value in options.items()})
+        return "OK"
+
+    async def _rpc_getGlobalOption(self, params: list[Any]) -> JsonValue:
+        return dict(self._global_options)
+
+    async def _rpc_changeGlobalOption(self, params: list[Any]) -> JsonValue:
+        options = params[0] if params and isinstance(params[0], dict) else {}
+        self._global_options.update({str(key): _coerce_json_value(value) for key, value in options.items()})
+        return "OK"
+
+    async def _rpc_getGlobalStat(self, params: list[Any]) -> JsonValue:
+        async with self._lock:
+            transfers = list(self._transfers.values())
+        active = [transfer for transfer in transfers if transfer.status == "active"]
+        waiting = [transfer for transfer in transfers if transfer.status in {"waiting", "paused"}]
+        stopped = [transfer for transfer in transfers if transfer.status in {"complete", "error", "removed"}]
+        return {
+            "downloadSpeed": str(sum(transfer.download_speed for transfer in active)),
+            "uploadSpeed": "0",
+            "numActive": str(len(active)),
+            "numWaiting": str(len(waiting)),
+            "numStopped": str(len(stopped)),
+            "numStoppedTotal": str(len(stopped)),
+        }
+
+    async def _rpc_getVersion(self, params: list[Any]) -> JsonValue:
+        return {
+            "version": "bitswarm-aria2-bridge/1.0.0a1",
+            "enabledFeatures": ["Bitswarm", "HTTPS", "Async DNS"],
+        }
+
+    async def _rpc_getSessionInfo(self, params: list[Any]) -> JsonValue:
+        return {"sessionId": self._session_id}
+
+    async def _rpc_pause(self, params: list[Any]) -> JsonValue:
+        return await self._pause_one(params)
+
+    async def _rpc_forcePause(self, params: list[Any]) -> JsonValue:
+        return await self._pause_one(params)
+
+    async def _rpc_pauseAll(self, params: list[Any]) -> JsonValue:
+        return await self._pause_all()
+
+    async def _rpc_forcePauseAll(self, params: list[Any]) -> JsonValue:
+        return await self._pause_all()
+
+    async def _rpc_unpause(self, params: list[Any]) -> JsonValue:
+        transfer = await self._transfer_from_params(params)
+        if transfer.status == "paused":
+            transfer.status = "waiting"
+            self._start_transfer(transfer)
+        return transfer.gid
+
+    async def _rpc_unpauseAll(self, params: list[Any]) -> JsonValue:
+        async with self._lock:
+            transfers = list(self._transfers.values())
+        for transfer in transfers:
+            if transfer.status == "paused":
+                transfer.status = "waiting"
+                self._start_transfer(transfer)
+        return "OK"
+
+    async def _rpc_remove(self, params: list[Any]) -> JsonValue:
+        return await self._remove_one(params)
+
+    async def _rpc_forceRemove(self, params: list[Any]) -> JsonValue:
+        return await self._remove_one(params)
+
+    async def _rpc_removeDownloadResult(self, params: list[Any]) -> JsonValue:
+        gid = _gid_from_params(params)
+        async with self._lock:
+            self._transfers.pop(gid, None)
+        return "OK"
+
+    async def _rpc_purgeDownloadResult(self, params: list[Any]) -> JsonValue:
+        async with self._lock:
+            for gid, transfer in list(self._transfers.items()):
+                if transfer.status in {"complete", "error", "removed"}:
+                    self._transfers.pop(gid, None)
+        return "OK"
+
+    async def _rpc_changePosition(self, params: list[Any]) -> JsonValue:
+        transfer = await self._transfer_from_params(params)
+        return transfer.gid
+
+    async def _select_transfers(
+        self,
+        statuses: list[str],
+        fields: list[Any] | None,
+    ) -> list[dict[str, JsonValue]]:
+        async with self._lock:
+            selected = [transfer for transfer in self._transfers.values() if transfer.status in statuses]
+        return [self._task_view(transfer, fields=fields) for transfer in selected]
+
+    async def _transfer_from_params(self, params: list[Any]) -> Transfer:
+        gid = _gid_from_params(params)
+        async with self._lock:
+            transfer = self._transfers.get(gid)
+        if transfer is None:
+            raise RpcFailure(1, f"gid not found: {gid}")
+        return transfer
+
+    async def _pause_one(self, params: list[Any]) -> JsonValue:
+        transfer = await self._transfer_from_params(params)
+        if transfer.task is not None and not transfer.task.done():
+            transfer.task.cancel()
+        transfer.status = "paused"
+        transfer.download_speed = 0
+        transfer.updated_at = time.monotonic()
+        return transfer.gid
+
+    async def _pause_all(self) -> JsonValue:
+        async with self._lock:
+            transfers = list(self._transfers.values())
+        for transfer in transfers:
+            if transfer.status in {"active", "waiting"}:
+                if transfer.task is not None and not transfer.task.done():
+                    transfer.task.cancel()
+                transfer.status = "paused"
+                transfer.download_speed = 0
+                transfer.updated_at = time.monotonic()
+        return "OK"
+
+    async def _remove_one(self, params: list[Any]) -> JsonValue:
+        transfer = await self._transfer_from_params(params)
+        if transfer.task is not None and not transfer.task.done():
+            transfer.task.cancel()
+        transfer.status = "removed"
+        transfer.download_speed = 0
+        transfer.stopped_at = time.monotonic()
+        transfer.updated_at = transfer.stopped_at
+        return transfer.gid
+
+    def _start_transfer(self, transfer: Transfer) -> None:
+        if transfer.task is not None and not transfer.task.done():
+            return
+        transfer.status = "active"
+        transfer.download_speed = 0
+        transfer.completed_pieces = 0
+        transfer.completed_length = 0
+        transfer._last_sample_time = time.monotonic()
+        transfer._last_sample_bytes = 0
+        transfer.task = asyncio.create_task(self._run_transfer(transfer))
+
+    async def _run_transfer(self, transfer: Transfer) -> None:
+        async def progress(done: int, total: int, piece_id: str) -> None:
+            del total, piece_id
+            transfer.update_progress(done)
+
+        try:
+            await self._download_fn(transfer.manifest, transfer.peer_urls, transfer.output_path, progress)
+            transfer.completed_pieces = transfer.num_pieces
+            transfer.completed_length = transfer.total_length
+            transfer.download_speed = 0
+            transfer.status = "complete"
+            transfer.stopped_at = time.monotonic()
+            transfer.updated_at = transfer.stopped_at
+        except asyncio.CancelledError:
+            transfer.download_speed = 0
+            transfer.updated_at = time.monotonic()
+        except Exception as exc:
+            transfer.status = "error"
+            transfer.error_code = "1"
+            transfer.error_message = str(exc)
+            transfer.download_speed = 0
+            transfer.stopped_at = time.monotonic()
+            transfer.updated_at = transfer.stopped_at
+
+    def _task_view(self, transfer: Transfer, *, fields: list[Any] | None = None) -> dict[str, JsonValue]:
+        view: dict[str, JsonValue] = {
+            "gid": transfer.gid,
+            "status": transfer.status,
+            "totalLength": str(transfer.total_length),
+            "completedLength": str(transfer.completed_length),
+            "uploadLength": "0",
+            "downloadSpeed": str(transfer.download_speed),
+            "uploadSpeed": "0",
+            "connections": str(len(transfer.peer_urls)),
+            "numSeeders": str(len(transfer.peer_urls)),
+            "seeder": "true" if transfer.status == "complete" else "false",
+            "dir": str(transfer.output_path.parent),
+            "files": self._file_views(transfer),
+            "bitfield": _bitfield(transfer.completed_pieces, transfer.num_pieces),
+            "numPieces": str(transfer.num_pieces),
+            "pieceLength": str(transfer.piece_length),
+            "errorCode": transfer.error_code,
+            "errorMessage": transfer.error_message,
+            "verifiedLength": str(transfer.completed_length),
+            "verifyIntegrityPending": "false",
+            "infoHash": transfer.manifest.root_hash[:40],
+            "bittorrent": {
+                "announceList": [],
+                "creationDate": "0",
+                "mode": "multi" if transfer.manifest.root_kind == "directory" else "single",
+                "info": {"name": transfer.manifest.name},
+            },
+        }
+        if fields:
+            return {str(field): view[str(field)] for field in fields if str(field) in view}
+        return view
+
+    def _file_views(self, transfer: Transfer) -> list[dict[str, JsonValue]]:
+        total = max(transfer.total_length, 1)
+        completed = transfer.completed_length
+        views: list[dict[str, JsonValue]] = []
+        for index, file in enumerate(transfer.manifest.files, start=1):
+            share = file.size / total
+            file_completed = (
+                min(file.size, int(completed * share))
+                if transfer.status != "complete"
+                else file.size
+            )
+            if transfer.manifest.root_kind == "file":
+                path = str(transfer.output_path)
+            else:
+                path = str(transfer.output_path / file.path)
+            views.append(
+                {
+                    "index": str(index),
+                    "path": path,
+                    "length": str(file.size),
+                    "completedLength": str(file_completed),
+                    "selected": "true",
+                    "uris": [{"uri": transfer.uri, "status": "used"}],
+                }
+            )
+        return views
+
+
+class RpcFailure(Exception):
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+async def _default_download(
+    manifest: BitswarmManifest,
+    peer_urls: list[PeerInput],
+    output_path: Path,
+    progress_cb: ProgressCallback | None,
+) -> Path:
+    return await download_manifest(
+        manifest,
+        peer_urls=peer_urls,
+        output_path=output_path,
+        progress_cb=progress_cb,
+    )
+
+
+async def _parse_bitswarm_uri(uri: str, *, options: dict[str, Any]) -> ParsedBitswarmUri:
+    parsed = urlparse(uri)
+    query = parse_qs(parsed.query, keep_blank_values=False)
+    if parsed.scheme in {"bitswarm", "bitswarm+file"}:
+        manifest_values = query.get("manifest")
+        if not manifest_values:
+            raise RpcFailure(-32602, "bitswarm URI requires a manifest query parameter")
+        manifest_ref = unquote(manifest_values[0])
+        peer_urls = [unquote(value) for value in query.get("peer", [])]
+        output_values = query.get("out", []) or query.get("output", [])
+        output_path = Path(unquote(output_values[0])).expanduser() if output_values else None
+        return ParsedBitswarmUri(
+            manifest_ref=manifest_ref,
+            peer_urls=peer_urls,
+            output_path=output_path,
+            tracker_url=_first_query_value(query, "tracker"),
+            tracker_token=_first_query_value(query, "token"),
+        )
+    if parsed.scheme == "file":
+        manifest_ref = unquote(parsed.path)
+        peer_urls = [unquote(value) for value in query.get("peer", [])]
+        output_values = query.get("out", []) or query.get("output", [])
+        output_path = Path(unquote(output_values[0])).expanduser() if output_values else None
+        return ParsedBitswarmUri(manifest_ref=manifest_ref, peer_urls=peer_urls, output_path=output_path)
+    if parsed.scheme in {"http", "https"}:
+        peer_urls = [unquote(value) for value in query.get("peer", [])]
+        output_values = query.get("out", []) or query.get("output", [])
+        output_path = Path(unquote(output_values[0])).expanduser() if output_values else None
+        return ParsedBitswarmUri(manifest_ref=uri, peer_urls=peer_urls, output_path=output_path)
+    path = Path(uri).expanduser()
+    if path.exists():
+        peer_option = options.get("peer") or options.get("bitswarm-peer")
+        peer_urls = _option_list(peer_option)
+        return ParsedBitswarmUri(manifest_ref=str(path), peer_urls=peer_urls, output_path=None)
+    raise RpcFailure(
+        -32602,
+        "expected bitswarm:?manifest=...&peer=... URI, file:// manifest URI, HTTP(S) manifest URI, "
+        "or existing local manifest path",
+    )
+
+
+async def _load_manifest_ref(ref: str) -> BitswarmManifest:
+    parsed = urlparse(ref)
+    if parsed.scheme in {"http", "https"}:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.get(ref)
+            response.raise_for_status()
+            return BitswarmManifest.model_validate(response.json())
+    if parsed.scheme == "file":
+        return load_manifest(Path(unquote(parsed.path)).expanduser())
+    return load_manifest(Path(ref).expanduser())
+
+
+def _output_path_from_options(
+    options: dict[str, Any],
+    *,
+    default_dir: Path,
+    manifest: BitswarmManifest,
+) -> Path:
+    directory = Path(str(options.get("dir") or default_dir)).expanduser()
+    name = str(options.get("out") or manifest.name)
+    return directory / name
+
+
+def _first_query_value(query: dict[str, list[str]], key: str) -> str | None:
+    values = query.get(key)
+    if not values:
+        return None
+    return unquote(values[0])
+
+
+def _option_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
+def _fields_from_tail(params: list[Any]) -> list[Any] | None:
+    if params and isinstance(params[-1], list):
+        return params[-1]
+    return None
+
+
+def _gid_from_params(params: list[Any]) -> str:
+    if not params or not isinstance(params[0], str):
+        raise RpcFailure(-32602, "gid is required")
+    return params[0]
+
+
+def _strip_token(params: list[Any]) -> list[Any]:
+    if params and isinstance(params[0], str) and params[0].startswith("token:"):
+        return params[1:]
+    return params
+
+
+def _coerce_json_value(value: Any) -> JsonValue:
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    if isinstance(value, list):
+        return [_coerce_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _coerce_json_value(item) for key, item in value.items()}
+    return str(value)
+
+
+def _bitfield(completed_pieces: int, total_pieces: int) -> str:
+    if total_pieces <= 0:
+        return ""
+    bits = ["1" if index < completed_pieces else "0" for index in range(total_pieces)]
+    while len(bits) % 4:
+        bits.append("0")
+    return "".join(f"{int(''.join(bits[index:index + 4]), 2):x}" for index in range(0, len(bits), 4))

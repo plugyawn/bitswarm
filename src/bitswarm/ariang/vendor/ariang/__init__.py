@@ -1,0 +1,1 @@
+"""Built AriaNg static assets."""

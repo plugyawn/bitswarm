@@ -49,3 +49,24 @@ to the downloader so a bad or partial peer is not tried for every manifest
 piece. Clients still verify every byte against the manifest, but applications
 with stricter network policy should filter direct and tracker peers before
 download.
+
+## AriaNg UI Bridge
+
+`bitswarm webui` serves a vendored build of the MIT-licensed AriaNg interface
+from a local FastAPI app. AriaNg talks to `/jsonrpc` using aria2's JSON-RPC
+shape; the local bridge maps the supported task/status calls to verified
+Bitswarm manifest downloads.
+
+The bridge is not a public transfer protocol. It is a local operator adapter
+for existing torrent/download-manager UI expectations. Public Bitswarm peers
+and trackers remain the endpoints documented in `docs/protocol.md`.
+
+Supported add-URI forms include:
+
+```text
+bitswarm:?manifest=/absolute/path/manifest.json&peer=http%3A%2F%2F127.0.0.1%3A8899&out=/absolute/output/path
+file:///absolute/path/manifest.json?peer=http%3A%2F%2F127.0.0.1%3A8899&out=/absolute/output/path
+```
+
+The bridge binds to loopback by default because it accepts local filesystem
+paths. Remote binding requires `--unsafe-allow-remote-bind`.
