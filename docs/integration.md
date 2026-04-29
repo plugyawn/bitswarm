@@ -112,9 +112,12 @@ Registered runs are projected into aria2 JSON-RPC responses as normal active
 tasks. AriaNg can therefore show running runs in the standard Downloading list,
 with startup checks, members, settings, issued seeds, and rollout summaries
 visible through normal task details. While a run is preparing, the projected
-task progress is the aggregate startup check progress, so the stock AriaNg
-progress bar behaves like torrent file checking. Once startup checks complete,
-the task switches to running and shows member/join progress.
+task progress uses the recipe's declared `artifact_bytes` plus seed/evaluator
+checks, so the stock AriaNg progress and file-size columns stay meaningful
+instead of showing tiny synthetic counters. The adapter also annotates native
+task rows with the active startup stage, for example "Downloading base weights"
+or "Confirming eval pipeline smoke." Once startup checks complete, the task
+switches to running and shows member/join progress.
 
 The UI can also render application progress such as training rounds, workers,
 rollouts, validation, or other workload state through an optional sidecar

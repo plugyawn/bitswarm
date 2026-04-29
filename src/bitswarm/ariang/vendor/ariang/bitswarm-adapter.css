@@ -56,3 +56,26 @@ body.bitswarm-bridge .main-sidebar li.header:nth-of-type(2) {
   white-space: normal;
   word-break: break-word;
 }
+
+body.bitswarm-bridge #content-wrapper tr.bitswarm-native-run-row > td {
+  vertical-align: top;
+}
+
+body.bitswarm-bridge #content-wrapper .bitswarm-native-run-status,
+body.bitswarm-bridge #content-wrapper .bitswarm-progress-note {
+  color: #666;
+  font-size: 12px;
+  line-height: 1.35;
+  margin-top: 4px;
+  max-width: 520px;
+  white-space: normal;
+}
+
+body.bitswarm-bridge #content-wrapper .bitswarm-native-run-status .label {
+  margin-right: 4px;
+}
+
+body.bitswarm-bridge #content-wrapper .bitswarm-progress-note {
+  border-left: 3px solid #3c8dbc;
+  padding-left: 6px;
+}

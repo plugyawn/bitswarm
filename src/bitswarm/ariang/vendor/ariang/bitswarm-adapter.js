@@ -321,6 +321,7 @@
       .then(function (payload) {
         runs = payload.runs || [];
         renderRuns();
+        annotateNativeRunRows();
       })
       .catch(showError);
   }
@@ -412,6 +413,82 @@
       '</div>' +
       '<small>' + escapeHtml(label) + ' · ' + progress.percent + '%</small>' +
       '</div>';
+  }
+
+  function annotateNativeRunRows() {
+    if (!runs.length) {
+      return;
+    }
+    var rows = document.querySelectorAll("#content-wrapper table tbody tr");
+    Array.prototype.forEach.call(rows, function (row) {
+      var text = row.textContent || "";
+      runs.forEach(function (run) {
+        if (text.indexOf(run.run_id) === -1 && text.indexOf(run.name) === -1) {
+          return;
+        }
+        row.classList.add("bitswarm-native-run-row");
+        var statusCell = row.querySelector("td");
+        upsertNativeRunStatus(statusCell, run);
+        upsertProgressNote(row, run);
+      });
+    });
+  }
+
+  function upsertNativeRunStatus(cell, run) {
+    if (!cell) {
+      return;
+    }
+    var node = cell.querySelector(".bitswarm-native-run-status");
+    if (!node) {
+      node = document.createElement("div");
+      node.className = "bitswarm-native-run-status";
+      cell.appendChild(node);
+    }
+    var check = currentStartupCheck(run);
+    var progress = startupProgress(run);
+    var detail = check ? check.label + " · " + check.current + "/" + check.total : "ready";
+    if (check && check.detail) {
+      detail += " · " + check.detail;
+    }
+    node.innerHTML = statusLabel(run.status) + " <span>" + escapeHtml(detail) +
+      " · " + progress.percent + "%</span>";
+  }
+
+  function upsertProgressNote(row, run) {
+    var progressCell = columnCell(row, ["Progress"]);
+    if (!progressCell) {
+      return;
+    }
+    var node = progressCell.querySelector(".bitswarm-progress-note");
+    if (!node) {
+      node = document.createElement("div");
+      node.className = "bitswarm-progress-note";
+      progressCell.appendChild(node);
+    }
+    var check = currentStartupCheck(run);
+    if (!check) {
+      node.textContent = "Run ready; waiting for members and seed rollout activity.";
+      return;
+    }
+    node.textContent = check.label + " · " + check.state + " · " +
+      check.current + "/" + check.total + (check.detail ? " · " + check.detail : "");
+  }
+
+  function columnCell(row, labels) {
+    var table = row.closest("table");
+    if (!table) {
+      return null;
+    }
+    var headers = table.querySelectorAll("thead th");
+    for (var index = 0; index < headers.length; index += 1) {
+      var header = (headers[index].textContent || "").trim().toLowerCase();
+      for (var labelIndex = 0; labelIndex < labels.length; labelIndex += 1) {
+        if (header.indexOf(labels[labelIndex].toLowerCase()) !== -1) {
+          return row.children[index] || null;
+        }
+      }
+    }
+    return null;
   }
 
   function summarizeSeeds(run) {
@@ -599,6 +676,7 @@
     refreshTimer = window.setInterval(function () {
       hideStockSettings();
       ensureRunButtons();
+      annotateNativeRunRows();
       refreshRuns();
     }, 1000);
     window.addEventListener("beforeunload", function () {

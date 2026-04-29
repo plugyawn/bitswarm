@@ -426,7 +426,11 @@ def _default_recipes() -> dict[str, RunRecipe]:
             description="Local demo lane with a small arithmetic evaluation profile.",
             model="mlx-community/Qwen2.5-0.5B-Instruct-4bit",
             evaluator="lighteval:arithmetic_2da",
-            defaults={"slice": "tail-4 + final RMSNorm", "paired_seeds": True},
+            defaults={
+                "slice": "tail-4 + final RMSNorm",
+                "paired_seeds": True,
+                "artifact_bytes": 276_200_000,
+            },
         ),
         RunRecipe(
             id="qwen05-gsm8k-fast",
@@ -434,7 +438,11 @@ def _default_recipes() -> dict[str, RunRecipe]:
             description="Cached local testnet recipe for fast multi-worker smoke runs.",
             model="mlx-community/Qwen2.5-0.5B-Instruct-4bit",
             evaluator="lighteval:gsm8k_fast",
-            defaults={"slice": "tail-4 + final RMSNorm", "paired_seeds": True},
+            defaults={
+                "slice": "tail-4 + final RMSNorm",
+                "paired_seeds": True,
+                "artifact_bytes": 276_200_000,
+            },
         ),
         RunRecipe(
             id="qwen15-gsm8k",
@@ -442,7 +450,11 @@ def _default_recipes() -> dict[str, RunRecipe]:
             description="Blessed lane recipe for the larger proposer/validator setup.",
             model="mlx-community/Qwen2.5-1.5B-Instruct-4bit",
             evaluator="lighteval:gsm8k",
-            defaults={"slice": "tail-4 + final RMSNorm", "paired_seeds": True},
+            defaults={
+                "slice": "tail-4 + final RMSNorm",
+                "paired_seeds": True,
+                "artifact_bytes": 869_000_000,
+            },
         ),
     ]
     return {recipe.id: recipe for recipe in recipes}

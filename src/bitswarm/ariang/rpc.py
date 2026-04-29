@@ -25,7 +25,7 @@ from bitswarm.protocol.manifest import load_manifest
 from bitswarm.protocol.paths import resolve_target_without_symlink_ancestors
 from bitswarm.protocol.schemas import BitswarmManifest
 
-from .runs import RunRecord, RunRegistry
+from .runs import RunRecord, RunRegistry, StartupCheck
 from .telemetry import TelemetryProgress, TelemetryProvider, WorkloadTelemetry
 
 JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
@@ -832,6 +832,7 @@ class AriaNgBridge:
         status = _run_status(run.status)
         gid = _run_gid(run.run_id)
         num_pieces = max(1, min(64, total))
+        display_name = _run_display_name(run)
         view: dict[str, JsonValue] = {
             "gid": gid,
             "status": status,
@@ -851,13 +852,13 @@ class AriaNgBridge:
             "errorCode": "1" if status == "error" else "0",
             "errorMessage": "",
             "verifiedLength": str(completed),
-            "verifyIntegrityPending": "true" if run.status == "preparing" else "false",
+            "verifyIntegrityPending": "false",
             "infoHash": gid * 2 + gid[:8],
             "bittorrent": {
                 "announceList": [],
                 "creationDate": str(run.created_at_ms // 1000),
                 "mode": "multi",
-                "info": {"name": f"{run.name} [{run.recipe_label}]"},
+                "info": {"name": display_name},
             },
             "comment": " | ".join(
                 [
@@ -1090,20 +1091,55 @@ def _scaled_pieces(completed: int, total: int) -> int:
 
 def _run_progress(run: RunRecord) -> tuple[int, int]:
     if run.status == "preparing" and run.startup_checks:
-        total = sum(max(check.total, 1) for check in run.startup_checks)
-        completed = sum(max(0, min(check.current, check.total)) for check in run.startup_checks)
+        total = sum(_run_check_length(run, check) for check in run.startup_checks)
+        completed = sum(_run_check_completed(run, check) for check in run.startup_checks)
         return completed, max(total, 1)
     total = max(1, int(run.settings.get("max_workers", 1)))
     return min(len(run.members), total), total
 
 
+def _run_display_name(run: RunRecord) -> str:
+    base = f"{run.name} [{run.recipe_label}]"
+    if run.status != "preparing" or not run.startup_checks:
+        return base
+    current = _current_startup_check(run)
+    return f"{base} - startup: {current.label}"
+
+
+def _current_startup_check(run: RunRecord) -> StartupCheck:
+    running = next((check for check in run.startup_checks if check.state == "running"), None)
+    pending = next((check for check in run.startup_checks if check.state == "pending"), None)
+    return running or pending or run.startup_checks[-1]
+
+
 def _run_phase_summary(run: RunRecord) -> str:
     if run.status == "preparing" and run.startup_checks:
-        running = next((check for check in run.startup_checks if check.state == "running"), None)
-        pending = next((check for check in run.startup_checks if check.state == "pending"), None)
-        current = running or pending or run.startup_checks[-1]
+        current = _current_startup_check(run)
         return f"startup {current.label.lower()} {current.current}/{current.total}"
     return run.status
+
+
+def _run_check_length(run: RunRecord, check: StartupCheck) -> int:
+    if check.id == "base-weights":
+        return max(1, _run_artifact_bytes(run))
+    return max(check.total, 1)
+
+
+def _run_check_completed(run: RunRecord, check: StartupCheck) -> int:
+    length = _run_check_length(run, check)
+    if check.total <= 0:
+        return 0
+    return max(0, min(length, int(round(length * (check.current / check.total)))))
+
+
+def _run_artifact_bytes(run: RunRecord) -> int:
+    value = run.settings.get("artifact_bytes", 100_000_000)
+    if isinstance(value, bool):
+        return 100_000_000
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 100_000_000
 
 
 def _rate_to_int(value: str) -> int:
@@ -1255,8 +1291,8 @@ def _run_file_views(run: RunRecord) -> list[dict[str, JsonValue]]:
                     check.label,
                     f"{check.state} {check.current}/{check.total} {check.detail}",
                 ),
-                check.total,
-                check.current,
+                _run_check_length(run, check),
+                _run_check_completed(run, check),
             )
         )
     for key, value in sorted(run.settings.items()):

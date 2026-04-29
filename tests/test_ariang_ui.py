@@ -119,7 +119,17 @@ async def test_ariang_projects_workload_telemetry_as_native_tasks(tmp_path: Path
                 "jsonrpc": "2.0",
                 "id": "active",
                 "method": "aria2.tellActive",
-                "params": [["gid", "status", "totalLength", "completedLength", "bittorrent", "files"]],
+                "params": [
+                    [
+                        "gid",
+                        "status",
+                        "totalLength",
+                        "completedLength",
+                        "verifyIntegrityPending",
+                        "bittorrent",
+                        "files",
+                    ]
+                ],
             },
         )
     assert response.status_code == 200
@@ -428,7 +438,17 @@ async def test_ariang_run_registry_projects_runs_as_native_tasks() -> None:
                 "jsonrpc": "2.0",
                 "id": "active",
                 "method": "aria2.tellActive",
-                "params": [["gid", "status", "totalLength", "completedLength", "bittorrent", "files"]],
+                "params": [
+                    [
+                        "gid",
+                        "status",
+                        "totalLength",
+                        "completedLength",
+                        "verifyIntegrityPending",
+                        "bittorrent",
+                        "files",
+                    ]
+                ],
             },
         )
         rows = active_response.json()["result"]
@@ -442,8 +462,10 @@ async def test_ariang_run_registry_projects_runs_as_native_tasks() -> None:
             json={"jsonrpc": "2.0", "id": "peers", "method": "aria2.getPeers", "params": [task["gid"]]},
         )
     assert task["status"] == "active"
-    assert task["totalLength"] == "106"
+    assert task["totalLength"] == str(276_200_000 + 5 + 1)
     assert task["completedLength"] == "0"
+    assert task["verifyIntegrityPending"] == "false"
+    assert task["bittorrent"]["info"]["name"].endswith("startup: Downloading base weights")
     assert any(file["path"].endswith("member/B/worker joined") for file in task["files"])
     assert any("startup/Downloading base weights/pending 0 / 100" in file["path"] for file in task["files"])
     assert any("seed/seed-000000/completed" in file["path"] for file in task["files"])
