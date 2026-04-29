@@ -117,7 +117,14 @@ checks, so the stock AriaNg progress and file-size columns stay meaningful
 instead of showing tiny synthetic counters. The adapter also annotates native
 task rows with the active startup stage, for example "Downloading base weights"
 or "Confirming eval pipeline smoke." Once startup checks complete, the task
-switches to running and shows member/join progress.
+switches to running and shows start-quorum progress. The default start quorum is
+`2`, clamped by the selected worker cap, so a fifteen-person lobby does not wait
+for all fifteen people before the run can start. The row-level adapter replaces
+the run's size/speed cells with quorum and phase text without relabeling global
+table headers, so normal file transfers keep ordinary AriaNg table semantics.
+Projected run tasks also omit fake `bittorrent` metadata. Real immutable
+file-tree transfers and sidecar workload telemetry keep their existing
+AriaNg-compatible fields.
 
 The UI can also render application progress such as training rounds, workers,
 rollouts, validation, or other workload state through an optional sidecar

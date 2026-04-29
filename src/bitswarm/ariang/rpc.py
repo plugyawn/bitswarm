@@ -796,7 +796,7 @@ class AriaNgBridge:
         run = await self._run_by_gid(gid)
         if run is None:
             return None
-        bitfield = _bitfield(len(run.members), max(1, int(run.settings.get("max_workers", 1))))
+        bitfield = _bitfield(len(run.members), _run_max_workers(run))
         return [
             {
                 "peerId": f"bitswarm-run-{member.actor}",
@@ -828,7 +828,7 @@ class AriaNgBridge:
         fields: list[Any] | None = None,
     ) -> dict[str, JsonValue]:
         completed, total = _run_progress(run)
-        max_workers = max(1, int(run.settings.get("max_workers", 1)))
+        max_workers = _run_max_workers(run)
         status = _run_status(run.status)
         gid = _run_gid(run.run_id)
         num_pieces = max(1, min(64, total))
@@ -842,8 +842,6 @@ class AriaNgBridge:
             "downloadSpeed": "0",
             "uploadSpeed": "0",
             "connections": str(len(run.members)),
-            "numSeeders": "1",
-            "seeder": "true" if status == "complete" else "false",
             "dir": f"bitswarm://runs/{run.run_id}",
             "files": _run_file_views(run),
             "bitfield": _bitfield(_scaled_pieces(completed, total), num_pieces),
@@ -853,20 +851,15 @@ class AriaNgBridge:
             "errorMessage": "",
             "verifiedLength": str(completed),
             "verifyIntegrityPending": "false",
-            "infoHash": gid * 2 + gid[:8],
-            "bittorrent": {
-                "announceList": [],
-                "creationDate": str(run.created_at_ms // 1000),
-                "mode": "multi",
-                "info": {"name": display_name},
-            },
             "comment": " | ".join(
                 [
+                    display_name,
                     f"host {run.host_actor}",
                     run.profile_label,
                     run.visibility,
                     _run_phase_summary(run),
-                    f"{len(run.members)}/{max_workers} joined",
+                    _run_members_summary(run),
+                    f"cap {max_workers}",
                 ]
             ),
         }
@@ -1094,7 +1087,7 @@ def _run_progress(run: RunRecord) -> tuple[int, int]:
         total = sum(_run_check_length(run, check) for check in run.startup_checks)
         completed = sum(_run_check_completed(run, check) for check in run.startup_checks)
         return completed, max(total, 1)
-    total = max(1, int(run.settings.get("max_workers", 1)))
+    total = _run_start_quorum(run)
     return min(len(run.members), total), total
 
 
@@ -1117,6 +1110,34 @@ def _run_phase_summary(run: RunRecord) -> str:
         current = _current_startup_check(run)
         return f"startup {current.label.lower()} {current.current}/{current.total}"
     return run.status
+
+
+def _run_members_summary(run: RunRecord) -> str:
+    quorum = _run_start_quorum(run)
+    return f"start quorum {min(len(run.members), quorum)}/{quorum} | members {len(run.members)}"
+
+
+def _run_start_quorum(run: RunRecord) -> int:
+    value = run.settings.get("min_start_members", 2)
+    if isinstance(value, bool):
+        target = 2
+    else:
+        try:
+            target = int(value)
+        except (TypeError, ValueError):
+            target = 2
+    max_workers = _run_max_workers(run)
+    return max(1, min(target, max_workers))
+
+
+def _run_max_workers(run: RunRecord) -> int:
+    value = run.settings.get("max_workers", 1)
+    if isinstance(value, bool):
+        return 1
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _run_check_length(run: RunRecord, check: StartupCheck) -> int:
@@ -1251,9 +1272,14 @@ def _safe_path_part(value: str) -> str:
     return " ".join(value.replace("/", " / ").split())
 
 
+def _safe_leaf_part(value: str) -> str:
+    return " ".join(value.replace("/", "-").split())
+
+
 def _run_file_views(run: RunRecord) -> list[dict[str, JsonValue]]:
     completed_run, total_run = _run_progress(run)
-    max_workers = max(1, int(run.settings.get("max_workers", 1)))
+    max_workers = _run_max_workers(run)
+    quorum = _run_start_quorum(run)
     pending = sum(1 for seed in run.seeds if seed.state == "pending")
     leased = sum(1 for seed in run.seeds if seed.state == "leased")
     completed = sum(1 for seed in run.seeds if seed.state == "completed")
@@ -1262,11 +1288,20 @@ def _run_file_views(run: RunRecord) -> list[dict[str, JsonValue]]:
             _display_path(
                 run.name,
                 "run",
-                run.run_id,
-                f"{run.status} {len(run.members)}/{max_workers} joined",
+                _safe_leaf_part(f"{_run_display_name(run)} - {run.run_id}"),
             ),
             total_run,
             completed_run,
+        ),
+        (
+            _display_path(
+                run.name,
+                "run",
+                run.run_id,
+                f"{run.status} start quorum {min(len(run.members), quorum)}/{quorum} cap {max_workers}",
+            ),
+            1,
+            1,
         ),
         (
             _display_path(

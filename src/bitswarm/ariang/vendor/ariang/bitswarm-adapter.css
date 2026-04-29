@@ -61,6 +61,10 @@ body.bitswarm-bridge #content-wrapper tr.bitswarm-native-run-row > td {
   vertical-align: top;
 }
 
+body.bitswarm-bridge #content-wrapper .bitswarm-hidden-stock-size {
+  display: none;
+}
+
 body.bitswarm-bridge #content-wrapper .bitswarm-native-run-status,
 body.bitswarm-bridge #content-wrapper .bitswarm-progress-note {
   color: #666;
@@ -78,4 +82,16 @@ body.bitswarm-bridge #content-wrapper .bitswarm-native-run-status .label {
 body.bitswarm-bridge #content-wrapper .bitswarm-progress-note {
   border-left: 3px solid #3c8dbc;
   padding-left: 6px;
+}
+
+body.bitswarm-bridge #content-wrapper .bitswarm-run-scope-cell,
+body.bitswarm-bridge #content-wrapper .bitswarm-run-phase-cell {
+  color: #444;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+body.bitswarm-bridge #content-wrapper .bitswarm-run-scope-cell small,
+body.bitswarm-bridge #content-wrapper .bitswarm-run-phase-cell small {
+  color: #777;
 }

@@ -103,13 +103,16 @@ that run. Newly started runs first show torrent-style startup health: base
 weights download/verification, seed manifest confirmation, and evaluator smoke
 validation. Those startup checks drive the normal AriaNg progress bar until the
 run goes green and switches to running. The native task row is annotated with
-the current startup stage, and recipe metadata supplies model-sized progress so
-the file-size column is not a tiny placeholder counter. The Runs view expands
-each run into issued seeds sorted by issue time, and each seed expands into
-pending/completed rollout rows per machine with green/red Bootstrap table states
-for correct and wrong results. Run state is also projected into AriaNg as
-ordinary active task rows, so the running run appears in the normal
-download-manager list.
+the current startup stage. For run rows, the stock file-size cell is replaced
+with the run start quorum and member cap while the progress bar still uses real
+startup bytes/check counts before startup completes. Once startup completes,
+progress switches to the run start quorum, which defaults to `2` and is capped
+by the selected worker limit. The Runs view expands each run into issued seeds
+sorted by issue time, and each seed expands into pending/completed rollout rows
+per machine with green/red Bootstrap table states for correct and wrong
+results. Run state is also projected into AriaNg as ordinary active task rows,
+so the running run appears in the normal download-manager list without exposing
+fake BitTorrent metadata for run tasks.
 
 Applications can project training or other workload progress into the UI with a
 separate sidecar presentation feed:

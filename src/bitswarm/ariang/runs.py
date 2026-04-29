@@ -173,6 +173,7 @@ class RunRegistry:
             "shortlist_ratio": profile.shortlist_ratio,
             **request.settings,
         }
+        settings = _normalize_run_settings(settings=settings, profile=profile)
         run = RunRecord(
             run_id=f"run-{secrets.token_hex(4)}",
             name=request.name.strip(),
@@ -512,6 +513,29 @@ def _make_seed_records(*, population: int, now_ms: int) -> list[SeedRecord]:
         )
         for index in range(max(0, population))
     ]
+
+
+def _normalize_run_settings(*, settings: dict[str, JsonScalar], profile: RunProfile) -> dict[str, JsonScalar]:
+    normalized = dict(settings)
+    max_workers = _positive_int_setting(normalized.get("max_workers"), profile.max_workers)
+    default_quorum = min(2, max_workers)
+    min_start_members = _positive_int_setting(
+        normalized.get("min_start_members"),
+        default_quorum,
+    )
+    normalized["max_workers"] = max_workers
+    normalized["min_start_members"] = max(1, min(min_start_members, max_workers))
+    normalized["population"] = _positive_int_setting(normalized.get("population"), profile.population)
+    return normalized
+
+
+def _positive_int_setting(value: JsonScalar | None, default: int) -> int:
+    if isinstance(value, bool) or value is None:
+        return max(1, default)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return max(1, default)
 
 
 def _make_startup_checks(*, recipe: RunRecipe, population: int, now_ms: int) -> list[StartupCheck]:

@@ -192,6 +192,17 @@ async def test_ariang_default_telemetry_is_disabled() -> None:
     assert response.json()["enabled"] is False
 
 
+def test_ariang_adapter_run_row_rewrites_are_row_local_and_idempotent() -> None:
+    adapter = Path("src/bitswarm/ariang/vendor/ariang/bitswarm-adapter.js").read_text(
+        encoding="utf-8"
+    )
+    assert "relabelRunTableHeaders" not in adapter
+    assert 'closest(".bitswarm-hidden-stock-size")' in adapter
+    assert 'typeof raw === "boolean"' in adapter
+    assert "text.indexOf(run.run_id) === -1" in adapter
+    assert "text.indexOf(run.run_id) === -1 && text.indexOf(run.name)" not in adapter
+
+
 async def test_ariang_run_registry_create_list_and_join() -> None:
     app = create_ariang_app(auto_bootstrap_runs=False)
     transport = httpx.ASGITransport(app=app)
@@ -446,13 +457,15 @@ async def test_ariang_run_registry_projects_runs_as_native_tasks() -> None:
                         "completedLength",
                         "verifyIntegrityPending",
                         "bittorrent",
+                        "dir",
+                        "comment",
                         "files",
                     ]
                 ],
             },
         )
         rows = active_response.json()["result"]
-        task = next(row for row in rows if row["bittorrent"]["info"]["name"].startswith("Native run task"))
+        task = next(row for row in rows if row["dir"] == f"bitswarm://runs/{run_id}")
         status_response = await client.post(
             "/jsonrpc",
             json={"jsonrpc": "2.0", "id": "status", "method": "aria2.tellStatus", "params": [task["gid"]]},
@@ -465,15 +478,146 @@ async def test_ariang_run_registry_projects_runs_as_native_tasks() -> None:
     assert task["totalLength"] == str(276_200_000 + 5 + 1)
     assert task["completedLength"] == "0"
     assert task["verifyIntegrityPending"] == "false"
-    assert task["bittorrent"]["info"]["name"].endswith("startup: Downloading base weights")
+    assert "bittorrent" not in task
+    assert task["files"][0]["path"].endswith(
+        f"Native run task [Qwen 0.5B arithmetic] - startup: Downloading base weights - {run_id}"
+    )
     assert any(file["path"].endswith("member/B/worker joined") for file in task["files"])
     assert any("startup/Downloading base weights/pending 0 / 100" in file["path"] for file in task["files"])
     assert any("seed/seed-000000/completed" in file["path"] for file in task["files"])
     assert any("rollout/seed-000000 arith-0000/B - completed wrong" in file["path"] for file in task["files"])
     assert status_response.json()["result"]["comment"] == (
-        "host A | Smoke | public | startup downloading base weights 0/100 | 2/14 joined"
+        "Native run task [Qwen 0.5B arithmetic] - startup: Downloading base weights | "
+        "host A | Smoke | public | startup downloading base weights 0/100 | "
+        "start quorum 2/2 | members 2 | cap 14"
     )
     assert {peer["ip"] for peer in peers_response.json()["result"]} == {"A", "B"}
+
+
+async def test_ariang_run_task_uses_start_quorum_after_startup() -> None:
+    app = create_ariang_app(auto_bootstrap_runs=False)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ui") as client:
+        create_response = await client.post(
+            "/api/bitswarm/ui/runs",
+            json={
+                "actor": "A",
+                "name": "Quorum task",
+                "recipe_id": "qwen05-arithmetic",
+                "profile_id": "smoke",
+                "visibility": "public",
+                "settings": {"population": 5, "max_workers": 14, "shortlist_ratio": 0.01},
+            },
+        )
+        run_id = create_response.json()["run_id"]
+        await client.post(f"/api/bitswarm/ui/runs/{run_id}/join", json={"actor": "B"})
+        await client.post(
+            f"/api/bitswarm/ui/runs/{run_id}/startup/base-weights",
+            json={"state": "complete", "current": 100},
+        )
+        await client.post(
+            f"/api/bitswarm/ui/runs/{run_id}/startup/seed-handshake",
+            json={"state": "complete", "current": 5},
+        )
+        await client.post(
+            f"/api/bitswarm/ui/runs/{run_id}/startup/eval-smoke",
+            json={"state": "complete", "current": 1},
+        )
+        active_response = await client.post(
+            "/jsonrpc",
+            json={
+                "jsonrpc": "2.0",
+                "id": "active",
+                "method": "aria2.tellActive",
+                "params": [
+                    ["gid", "status", "totalLength", "completedLength", "comment", "dir", "bittorrent"]
+                ],
+            },
+        )
+    task = next(
+        row
+        for row in active_response.json()["result"]
+        if row["dir"] == f"bitswarm://runs/{run_id}"
+    )
+    assert task["totalLength"] == "2"
+    assert task["completedLength"] == "2"
+    assert "bittorrent" not in task
+    assert task["comment"] == (
+        "Quorum task [Qwen 0.5B arithmetic] | host A | Smoke | public | running | "
+        "start quorum 2/2 | members 2 | cap 14"
+    )
+
+
+async def test_ariang_run_start_quorum_is_normalized_against_worker_cap() -> None:
+    app = create_ariang_app(auto_bootstrap_runs=False)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ui") as client:
+        create_response = await client.post(
+            "/api/bitswarm/ui/runs",
+            json={
+                "actor": "A",
+                "name": "Solo worker run",
+                "recipe_id": "qwen05-arithmetic",
+                "profile_id": "smoke",
+                "visibility": "public",
+                "settings": {
+                    "population": 5,
+                    "max_workers": 1,
+                    "min_start_members": 2,
+                    "shortlist_ratio": 0.01,
+                },
+            },
+        )
+        created = create_response.json()
+        run_id = created["run_id"]
+        await client.post(
+            f"/api/bitswarm/ui/runs/{run_id}/startup/base-weights",
+            json={"state": "complete", "current": 100},
+        )
+        await client.post(
+            f"/api/bitswarm/ui/runs/{run_id}/startup/seed-handshake",
+            json={"state": "complete", "current": 5},
+        )
+        await client.post(
+            f"/api/bitswarm/ui/runs/{run_id}/startup/eval-smoke",
+            json={"state": "complete", "current": 1},
+        )
+        active_response = await client.post(
+            "/jsonrpc",
+            json={
+                "jsonrpc": "2.0",
+                "id": "active",
+                "method": "aria2.tellActive",
+                "params": [["gid", "status", "totalLength", "completedLength", "comment", "dir"]],
+            },
+        )
+        bool_quorum_response = await client.post(
+            "/api/bitswarm/ui/runs",
+            json={
+                "actor": "B",
+                "name": "Boolean quorum run",
+                "recipe_id": "qwen05-arithmetic",
+                "profile_id": "smoke",
+                "visibility": "public",
+                "settings": {
+                    "population": 5,
+                    "max_workers": 1,
+                    "min_start_members": True,
+                    "shortlist_ratio": 0.01,
+                },
+            },
+        )
+    assert created["settings"]["max_workers"] == 1
+    assert created["settings"]["min_start_members"] == 1
+    assert bool_quorum_response.json()["settings"]["min_start_members"] == 1
+    task = next(
+        row
+        for row in active_response.json()["result"]
+        if row["dir"] == f"bitswarm://runs/{run_id}"
+    )
+    assert task["totalLength"] == "1"
+    assert task["completedLength"] == "1"
+    assert "start quorum 1/1 | members 1 | cap 1" in task["comment"]
 
 
 async def test_ariang_jsonrpc_add_uri_download_tracks_completion(

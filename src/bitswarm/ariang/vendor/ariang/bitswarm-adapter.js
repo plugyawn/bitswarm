@@ -423,14 +423,41 @@
     Array.prototype.forEach.call(rows, function (row) {
       var text = row.textContent || "";
       runs.forEach(function (run) {
-        if (text.indexOf(run.run_id) === -1 && text.indexOf(run.name) === -1) {
+        if (text.indexOf(run.run_id) === -1) {
           return;
         }
         row.classList.add("bitswarm-native-run-row");
         var statusCell = row.querySelector("td");
+        hideGenericSizeText(statusCell);
         upsertNativeRunStatus(statusCell, run);
         upsertProgressNote(row, run);
+        upsertRunScope(row, run);
+        upsertRunPhase(row, run);
       });
+    });
+  }
+
+  function hideGenericSizeText(cell) {
+    if (!cell) {
+      return;
+    }
+    var walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+    var nodes = [];
+    while (walker.nextNode()) {
+      nodes.push(walker.currentNode);
+    }
+    nodes.forEach(function (node) {
+      if (node.parentElement && node.parentElement.closest(".bitswarm-hidden-stock-size")) {
+        return;
+      }
+      var value = node.nodeValue || "";
+      if (!/\b\d+(?:\.\d+)?\s*(?:B|KB|MB|GB|TB)\b/i.test(value) || value.indexOf("Files") === -1) {
+        return;
+      }
+      var span = document.createElement("span");
+      span.className = "bitswarm-hidden-stock-size";
+      span.textContent = value;
+      node.parentNode.replaceChild(span, node);
     });
   }
 
@@ -450,8 +477,8 @@
     if (check && check.detail) {
       detail += " · " + check.detail;
     }
-    node.innerHTML = statusLabel(run.status) + " <span>" + escapeHtml(detail) +
-      " · " + progress.percent + "%</span>";
+    node.innerHTML = statusLabel(run.status) + " <span>" + escapeHtml(runMembersSummary(run)) +
+      " · " + escapeHtml(detail) + " · " + progress.percent + "%</span>";
   }
 
   function upsertProgressNote(row, run) {
@@ -472,6 +499,55 @@
     }
     node.textContent = check.label + " · " + check.state + " · " +
       check.current + "/" + check.total + (check.detail ? " · " + check.detail : "");
+  }
+
+  function upsertRunScope(row, run) {
+    var scopeCell = columnCell(row, ["File Size", "Run Scope"]);
+    if (!scopeCell) {
+      return;
+    }
+    scopeCell.classList.add("bitswarm-run-scope-cell");
+    scopeCell.innerHTML = '<strong>' + escapeHtml(startQuorum(run)) + '</strong> start quorum<br>' +
+      '<small>' + escapeHtml((run.members || []).length + ' members · cap ' + maxWorkers(run)) + '</small>';
+  }
+
+  function upsertRunPhase(row, run) {
+    var phaseCell = columnCell(row, ["Download Speed", "Run Phase"]);
+    if (!phaseCell) {
+      return;
+    }
+    var check = currentStartupCheck(run);
+    var phase = run.status === "preparing" && check ? check.label : run.status;
+    var detail = run.status === "preparing" && check ?
+      check.current + "/" + check.total + (check.detail ? " · " + check.detail : "") :
+      runMembersSummary(run);
+    phaseCell.classList.add("bitswarm-run-phase-cell");
+    phaseCell.innerHTML = statusLabel(run.status) + '<br><span>' + escapeHtml(phase) + '</span>' +
+      '<br><small>' + escapeHtml(detail) + '</small>';
+  }
+
+  function runMembersSummary(run) {
+    var quorum = startQuorum(run);
+    var joined = Math.min((run.members || []).length, quorum);
+    return "start " + joined + "/" + quorum + " · cap " + maxWorkers(run);
+  }
+
+  function startQuorum(run) {
+    var raw = (run.settings || {}).min_start_members;
+    var value = typeof raw === "boolean" ? 2 : Number(raw || 2);
+    var cap = maxWorkers(run);
+    if (!Number.isFinite(value) || value < 1) {
+      value = 2;
+    }
+    return Math.max(1, Math.min(Math.floor(value), cap));
+  }
+
+  function maxWorkers(run) {
+    var value = Number((run.settings || {}).max_workers || 1);
+    if (!Number.isFinite(value) || value < 1) {
+      return 1;
+    }
+    return Math.floor(value);
   }
 
   function columnCell(row, labels) {
